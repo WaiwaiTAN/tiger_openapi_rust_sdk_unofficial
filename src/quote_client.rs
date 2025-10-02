@@ -17,6 +17,9 @@ use openssl::string;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
+use serde_json::Map;
+use std::collections::HashMap;
+
 /// 通用请求包装，带有业务数据和签名信息
 #[derive(Debug, Clone, Serialize)]
 pub struct RequestWrapper<'a, T> {
@@ -25,7 +28,7 @@ pub struct RequestWrapper<'a, T> {
     #[serde(skip)]
     pub biz_content_obj: Option<T>, // 业务内容（泛型）
     pub biz_content: String,
-    pub timestamp: String,      // 时间戳
+    pub timestamp: String, // 时间戳
     #[serde(flatten)]
     pub config: &'a ClientConfig, // 固定配置
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -41,13 +44,6 @@ struct AssetBiz {
     lang: String,
 }
 
-/// 示例：另一个业务的内容
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserBiz {
-    pub user_id: String,
-    pub nickname: String,
-}
-
 #[derive(Debug, Deserialize)]
 struct ApiResponse<T> {
     code: i32,
@@ -55,12 +51,122 @@ struct ApiResponse<T> {
     data: Option<T>,
 }
 
-#[derive(Debug, Deserialize)]
-struct GrabQuotePermissionData {
-    // 根据服务端实际返回结构补充字段
-    // 例如：permission: bool
-    // permission: Option<bool>,
+use base64::{Engine as _, engine::general_purpose};
+use rsa::{RsaPublicKey, pkcs1v15::VerifyingKey, pkcs8::DecodePublicKey, signature::Verifier};
+use serde_json::Value;
+use sha2::Sha256;
+
+#[derive(Debug)]
+pub struct ResponseException(pub String);
+
+/// 等价于 Python 的 TigerResponse
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct TigerResponse {
+    pub code: Option<i32>,
+    pub message: Option<String>,
+    pub data: Option<Value>, // 用 serde_json::Value 来存储动态 JSON
 }
+
+impl TigerResponse {
+    pub fn is_success(&self) -> bool {
+        self.code == Some(0)
+    }
+
+    pub fn parse_response_content(&mut self, response: &Value) -> Value {
+        if let Some(code) = response.get("code").and_then(|v| v.as_i64()) {
+            self.code = Some(code as i32);
+        }
+        if let Some(msg) = response.get("message").and_then(|v| v.as_str()) {
+            self.message = Some(msg.to_string());
+        }
+        if let Some(data) = response.get("data") {
+            if data.is_string() {
+                if let Ok(parsed) = serde_json::from_str::<Value>(data.as_str().unwrap()) {
+                    self.data = Some(parsed);
+                }
+            } else {
+                self.data = Some(data.clone());
+            }
+        }
+        response.clone()
+    }
+}
+
+/// 等价于 Python 的 FundDetailsResponse
+#[derive(Debug, Default)]
+pub struct FundDetailsResponse {
+    pub base: TigerResponse,
+    pub result: Vec<HashMap<String, Value>>, // 用 Vec<HashMap> 代替 DataFrame
+    pub is_success: Option<bool>,
+}
+
+impl FundDetailsResponse {
+    pub fn new() -> Self {
+        FundDetailsResponse {
+            base: TigerResponse::default(),
+            result: Vec::new(),
+            is_success: None,
+        }
+    }
+
+    pub fn parse_response_content(&mut self, response_content: &Value) {
+        let response = self.base.parse_response_content(response_content);
+
+        if let Some(success) = response.get("is_success").and_then(|v| v.as_bool()) {
+            self.is_success = Some(success);
+        }
+
+        if let Some(data) = &self.base.data {
+            if let Some(obj) = data.as_object() {
+                // 模拟 camel_to_underline 转换
+                let mut normalized: HashMap<String, Value> = HashMap::new();
+                for (k, v) in obj {
+                    normalized.insert(camel_to_underline(k), v.clone());
+                }
+
+                if let Some(items) = normalized.get("items").and_then(|v| v.as_array()) {
+                    self.result = items
+                        .iter()
+                        .filter_map(|item| item.as_object())
+                        .map(|map| {
+                            map.iter()
+                                .map(|(k, v)| (camel_to_underline(k), v.clone()))
+                                .collect::<HashMap<String, Value>>()
+                        })
+                        .collect();
+
+                    // 给每一行加上 page/limit/item_count/page_count/timestamp
+                    for row in &mut self.result {
+                        for key in ["page", "limit", "item_count", "page_count", "timestamp"] {
+                            if let Some(val) = normalized.get(key) {
+                                row.insert(key.to_string(), val.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 简单实现 camelCase -> snake_case
+fn camel_to_underline(s: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+#[derive(Debug, Deserialize)]
+struct GrabQuotePermissionData {}
 
 use std::collections::BTreeMap;
 
@@ -107,6 +213,31 @@ impl QuoteClient {
         if grab_permission {}
 
         client
+    }
+
+    pub fn parse_response(
+        &mut self,
+        response_str: &str,
+        ts: &str,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        // 解析 JSON
+        let response_content: Value = serde_json::from_str(response_str)?;
+
+        // 如果没有公钥、没有 sign 或没有 timestamp，则直接返回
+        if self.config.server_public_key.is_empty() || !response_content.get("sign").is_some() {
+            return Ok(response_content);
+        }
+
+        let sign = response_content["sign"].as_str().unwrap_or("");
+
+        // 验签
+        let verify_res =
+            crypto_utils::sha1_verify(ts, sign, &self.config.server_public_key.as_str())?;
+        if !verify_res {
+            return Err(format!("response sign verify failed: {}", response_str).into());
+        }
+
+        Ok(response_content)
     }
 
     /// 发起真实的 HTTP POST 请求以获取行情权限
@@ -164,8 +295,6 @@ impl QuoteClient {
         let json_without_sign = serialize_request(&body);
         println!("content need to be signed:\n{}", json_without_sign);
 
-        // let json_without_sign = "biz_content={\"account\":\"65568723\",\"base_currency\":\"HKD\",\"consolidated\":true,\"lang\":\"en_US\"}&charset=UTF-8&device_id=00:15:5d:c6:84:86&method=prime_assets&sign_type=RSA&tiger_id=20155322&timestamp=2025-10-01 22:49:49&version=2.0".to_string();
-
         // 3. 计算签名
         let signature = crypto_utils::get_sign(&self.config.private_key, &json_without_sign)?;
         println!("calculated sign:\n{:?}", signature);
@@ -185,18 +314,27 @@ impl QuoteClient {
         if !status.is_success() {
             return Err(format!("HTTP error: {}", status).into());
         }
+        let content = resp.text().await?;
+        if let Ok(value) = self.parse_response(content.as_str(), body.timestamp.as_str()) {
+            // 如果解析成功，继续往下执行
+            println!("解析成功: {:?}", value);
 
-        let api_resp: ApiResponse<GrabQuotePermissionData> = resp.json().await?;
+            
+        } else {
+            println!("Failed to verify the message!");
+        };
+
+        let code = 0;
         // 约定：code == 0 表示成功；如不一致，请按服务端文档调整
-        if api_resp.code == 0 {
+        if code == 0 {
             self.has_permission = true;
-            println!("{:?}", api_resp.data);
             Ok(())
         } else {
-            let msg = api_resp
-                .message
-                .unwrap_or_else(|| "unknown error".to_string());
-            Err(format!("API error code {}: {}", api_resp.code, msg).into())
+            // let msg = api_resp
+            //     .message
+            //     .unwrap_or_else(|| "unknown error".to_string());
+            // Err(format!("API error code {}: {}", api_resp.code, msg).into())
+            Err(format!("API error code {}: {}", 0, "nothing").into())
         }
     }
 }

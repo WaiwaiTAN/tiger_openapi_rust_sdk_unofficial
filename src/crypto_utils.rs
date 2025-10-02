@@ -1,9 +1,9 @@
-use openssl::rsa::{Rsa};
-use openssl::pkey::PKey;
-use openssl::sign::{Signer, Verifier};
-use openssl::hash::MessageDigest;
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use openssl::error::ErrorStack;
+use openssl::hash::MessageDigest;
+use openssl::pkey::PKey;
+use openssl::rsa::Rsa;
+use openssl::sign::{Signer, Verifier};
 use rsa::signature;
 
 /// 等价于 C++ 的 hmac_sha1，返回 HMAC-SHA1 的原始字节
@@ -17,7 +17,10 @@ pub fn hmac_sha1(key: &[u8], data: &[u8]) -> Result<Vec<u8>, ErrorStack> {
 
 /// 从 PEM 读取 RSA 私钥或公钥（PEM 为 UTF-8 文本）
 /// is_private=true 读取私钥；false 读取公钥
-pub fn create_rsa(key_pem: &str, is_private: bool) -> Result<Rsa<openssl::pkey::Private>, ErrorStack> {
+pub fn create_rsa(
+    key_pem: &str,
+    is_private: bool,
+) -> Result<Rsa<openssl::pkey::Private>, ErrorStack> {
     if is_private {
         Rsa::private_key_from_pem(key_pem.as_bytes())
     } else {
@@ -31,7 +34,10 @@ pub fn create_rsa(key_pem: &str, is_private: bool) -> Result<Rsa<openssl::pkey::
 }
 
 /// 用 SHA1 对 context 进行 RSA PKCS#1 v1.5 签名，返回原始签名字节
-pub fn sha1_sign(context: &str, private_key_pem: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+pub fn sha1_sign(
+    context: &str,
+    private_key_pem: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let content_bytes = match "utf-8" {
         "utf-8" => context.as_bytes(),
         _ => return Err("Unsupported charset".into()),
@@ -49,26 +55,36 @@ pub fn sha1_sign(context: &str, private_key_pem: &str) -> Result<Vec<u8>, Box<dy
     Ok(signature)
 }
 
-/// 使用 SHA1 与 RSA PKCS#1 v1.5 验签。sign 为 Base64 编码的签名（与 C++ 行为一致）
-/// 返回 1 表示成功，0 表示失败（与 C++ 的 ret 语义对齐）
-pub fn sha1_verify(context: &str, sign_base64: &str, public_key_pem: &str) -> Result<i32, Box<dyn std::error::Error>> {
+/// 使用 SHA1 与 RSA PKCS#1 v1.5 验签。sign 为 Base64 编码的签名
+pub fn sha1_verify(
+    context: &str,
+    sign_base64: &str,
+    public_key_pem: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
     // 读取公钥（SubjectPublicKeyInfo）
-    let pkey = PKey::public_key_from_pem(public_key_pem.as_bytes())
+    let filled = fill_public_key_marker(public_key_pem);
+    let pkey = PKey::public_key_from_pem(filled.as_bytes())
         .map_err(|_| "RSA creation failed, please check your public key")?;
 
     // Base64 解码签名
-     let signature = general_purpose::STANDARD.decode(sign_base64)?;
+    let signature = general_purpose::STANDARD
+        .decode(sign_base64)
+        .map_err(|_| "Base64 decode signature failed")?;
 
     let mut verifier = Verifier::new(MessageDigest::sha1(), &pkey)?;
-    verifier.update(context.as_bytes())?;
+    verifier
+        .update(context.as_bytes())
+        .map_err(|_| "failed to verify")?;
 
-    let ok = verifier.verify(&signature)?;
-    Ok(if ok { 1 } else { 0 })
+    let ok = verifier.verify(&signature).map_err(|_| "fao;")?;
+    Ok(if ok { true } else { false })
 }
 
-
 /// 获取 Base64 编码的签名
-pub fn get_sign(private_key_pem: &str, content: &str) -> Result<String, Box<dyn std::error::Error>> {
+pub fn get_sign(
+    private_key_pem: &str,
+    content: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let filled = fill_private_key_marker(private_key_pem);
     let signature = sha1_sign(content, &filled)?;
     Ok(general_purpose::STANDARD.encode(signature))
@@ -97,7 +113,6 @@ pub fn fill_public_key_marker(key: &str) -> String {
         )
     }
 }
-
 
 // pub fn get_sign(private_key_pem: &str, content: &str) -> Result<String, Box<dyn std::error::Error>> {
 //     let filled = fill_private_key_marker(private_key_pem);
