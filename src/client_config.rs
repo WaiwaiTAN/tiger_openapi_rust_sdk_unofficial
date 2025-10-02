@@ -164,10 +164,10 @@ impl ClientConfig {
             // 注：C++ 中 server_public_key 在 US 环境下未覆盖，保持默认或 sandbox 值
         }
 
-        println!(
-            "Loaded properties successfully, tiger_id: {} account: {}",
-            self.tiger_id, self.account
-        );
+        // println!(
+        //     "Loaded properties successfully, tiger_id: {} account: {}",
+        //     self.tiger_id, self.account
+        // );
     }
 
     // C++: load_token()
@@ -189,7 +189,7 @@ impl ClientConfig {
         }
         if let Some(v) = props.get_property("token") {
             self.token = v;
-            println!("Loaded token successfully, token: {}", self.token);
+            // println!("Loaded token successfully, token: {}", self.token);
         }
     }
 

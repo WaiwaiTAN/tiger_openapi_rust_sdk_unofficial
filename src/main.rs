@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cfg.load_token();
     // 从 ClientConfig 转换成 QuoteClient
     let mut quote_client = QuoteClient::new(cfg, false);
-    quote_client.grab_quote_permission().await?;
+    quote_client.prime_assets().await?;
 
     Ok(())
 }
