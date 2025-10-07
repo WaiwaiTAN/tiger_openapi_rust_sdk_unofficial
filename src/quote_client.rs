@@ -176,7 +176,7 @@ impl QuoteClient {
     }
 
     /// 发起真实的 HTTP POST 请求以获取行情权限
-    pub async fn prime_assets(&mut self) -> Result<(f64), Box<dyn std::error::Error>> {
+    pub async fn prime_assets(&mut self) -> Result<f64, Box<dyn std::error::Error>> {
         let url = &self.config.server_url;
 
         // 构建 headers
@@ -252,7 +252,7 @@ impl QuoteClient {
 
         if resp.code == 0 {
             if let Some(account_data) = resp.data {
-                Ok(account_data.segments[1].gross_position_value)
+                Ok(account_data.segments[0].buying_power)
             } else {
                 Err(format!("Server Error, No account data recv").into())
             }
