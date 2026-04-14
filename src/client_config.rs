@@ -5,6 +5,8 @@ use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
 use openssl::string;
+use serde::de::value;
+use std::error::Error;
 use serde::{Deserialize, Serialize};
 
 use crate::constants;
@@ -31,6 +33,9 @@ pub struct ClientConfig {
     #[serde(skip)]
     pub private_key: String,
 
+    #[serde(skip)]
+    pub secret_key: String,
+    
     pub charset: String,
     #[serde(skip)]
     pub version: String,
@@ -149,10 +154,6 @@ impl ClientConfig {
             env.make_ascii_uppercase();
             if env == "SANDBOX" {
                 self.sandbox_debug = true;
-                self.server_url = constants::SANDBOX_TIGER_SERVER_URL.to_string();
-                self.server_public_key = constants::SANDBOX_TIGER_PUBLIC_KEY.to_string();
-                self.socket_url = constants::SANDBOX_TIGER_SOCKET_HOST.to_string();
-                self.socket_port = constants::SANDBOX_TIGER_SOCKET_PORT.to_string();
             }
         }
 
@@ -228,5 +229,17 @@ impl ClientConfig {
     // C++: is_us() => license == TBUS
     pub fn is_us(&self) -> bool {
         !self.license.is_empty() && self.license == "TBUS"
+    }
+
+    pub fn check(&self) -> Result<(), Box<dyn Error>> {
+        if self.tiger_id.is_empty() {
+            eprintln!("Client Config error: tiger_id can't be empty");
+            return Err("Client Config error: tiger_id can't be empty".into());
+        }
+        if self.private_key.is_empty() {
+            eprintln!("Client Config error: private_key can't be empty");
+            return Err("Client Config error: private_key can't be empty".into());
+        }
+        Ok(())
     }
 }

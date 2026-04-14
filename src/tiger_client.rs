@@ -1,272 +1,172 @@
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
-use std::collections::HashMap;
-
-use reqwest::{Client, StatusCode};
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
-use serde::{Deserialize, Serialize};
-
+use crate::client_config::ClientConfig;
 use crate::constants;
+use crate::contract_utils;
+use crate::tiger_utils;
 
-/// 错误类型（可根据你的 C++ 行为扩展）
-#[derive(Debug)]
-pub enum TigerError {
-    Http(StatusCode, String),
-    Reqwest(reqwest::Error),
-    Json(serde_json::Error),
-    Sign(String),
-    Other(String),
-}
-
-impl From<reqwest::Error> for TigerError {
-    fn from(err: reqwest::Error) -> Self {
-        TigerError::Reqwest(err)
-    }
-}
-
-impl From<serde_json::Error> for TigerError {
-    fn from(err: serde_json::Error) -> Self {
-        TigerError::Json(err)
-    }
-}
-
-/// 返回通用响应包（示例）
-#[derive(Debug, Deserialize)]
-pub struct ApiResponse<T> {
-    pub code: i32,
-    pub message: Option<String>,
-    pub data: Option<T>,
-}
-
-/// 示例数据结构（根据你的 C++ 对应类型替换）
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Quote {
-    pub symbol: String,
-    pub last_price: f64,
-    pub timestamp: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct OrderRequest {
-    pub symbol: String,
-    pub quantity: i64,
-    pub side: String,   // "BUY"/"SELL"
-    pub type_: String,  // "LIMIT"/"MARKET" 等
-    pub price: Option<f64>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct OrderResponse {
-    pub order_id: String,
-    pub status: String,
-}
-
-/// Tiger 客户端
-#[derive(Clone)]
+use anyhow::{Result, anyhow};
+use reqwest::{
+    Client, Method, Response,
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT},
+};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::error::Error;
+#[derive(Debug, Clone)]
 pub struct TigerClient {
-    client: Client,
-    base_url: String,
-    app_key: String,
-    secret_key: String,
-    api_version: String,
-    default_timeout: Duration,
+    pub client_config: ClientConfig,
 }
 
 impl TigerClient {
-    /// 构造函数：按需设置连接池、超时、UA 等
-    pub fn new(
-        base_url: impl Into<String>,
-        app_key: impl Into<String>,
-        secret_key: impl Into<String>,
-        api_version: impl Into<String>,
-    ) -> Result<Self, TigerError> {
-        let client = Client::builder()
-            .user_agent(USER_AGENT)
-            .tcp_keepalive(Duration::from_secs(30))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .build()
-            .map_err(TigerError::Reqwest)?;
+    pub fn new(cf: ClientConfig) -> Self {
+        TigerClient { client_config: cf }
+    }
 
-        Ok(Self {
-            client,
-            base_url: base_url.into(),
-            app_key: app_key.into(),
-            secret_key: secret_key.into(),
-            api_version: api_version.into(),
-            default_timeout: Duration::from_secs(10),
+    pub fn set_config(&mut self, cf: ClientConfig) {
+        self.client_config = cf;
+        self.client_config.check();
+    }
+
+    fn build_sign_content(&self, obj: &Value) -> String {
+        // 确保 obj 是一个对象
+        let obj_obj = obj.as_object().expect("Expected JSON object");
+        // 收集所有 key
+        let mut keys: Vec<&String> = obj_obj.keys().collect();
+        // 排序
+        keys.sort();
+        // 拼接字符串
+        let mut result = String::new();
+        for key in keys {
+            if !result.is_empty() {
+                result.push('&');
+            }
+            let val = obj_obj.get(key).unwrap();
+            // 假设 value 是字符串类型
+            let val_str = val.as_str().expect("Expected string value");
+            result.push_str(key);
+            result.push('=');
+            result.push_str(val_str);
+        }
+        result
+    }
+
+    fn build_common_params(&self) -> Value {
+        serde_json::json!({
+            constants::P_TIGER_ID: self.client_config.tiger_id,
+            constants::P_CHARSET:self.client_config.charset,
+            constants::P_VERSION: constants::OPEN_API_SERVICE_VERSION,
+            constants::P_SIGN_TYPE: self.client_config.sign_type,
+            constants::P_DEVICE_ID: self.client_config.device_id,
         })
     }
 
-    /// 统一构造公共 headers（含签名/时间戳等）
-    fn build_headers(
-        &self,
-        path: &str,
-        method: &str,
-        query: Option<&HashMap<String, String>>,
-        body_json: Option<&serde_json::Value>,
-        timestamp: u64,
-    ) -> Result<HeaderMap, TigerError> {
-        let mut headers = HeaderMap::new();
-
-        headers.insert("X-APP-KEY", HeaderValue::from_str(&self.app_key).unwrap());
-        headers.insert("X-TIMESTAMP", HeaderValue::from_str(&timestamp.to_string()).unwrap());
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static(CONTENT_TYPE_JSON));
-
-        // 计算签名（占位）
-        let sign = self.sign_request(path, method, query, body_json, timestamp)?;
-        headers.insert("X-SIGNATURE", HeaderValue::from_str(&sign).unwrap());
-
-        Ok(headers)
+    pub async fn post(&self, api_method: &str, params: Value) -> Result<Value> {
+        self.send_request(Method::POST, api_method, params).await
     }
 
-    /// 签名函数（替换为你 C++ 的实际算法）
-    fn sign_request(
-        &self,
-        path: &str,
-        method: &str,
-        query: Option<&HashMap<String, String>>,
-        body_json: Option<&serde_json::Value>,
-        timestamp: u64,
-    ) -> Result<String, TigerError> {
-        // 示例：将关键字段拼接后进行 HMAC-SHA256，再 hex/BASE64
-        // 注意：这里是占位逻辑，请用真实的签名规则替换（字段顺序、分隔符、编码都需要与服务端一致）
-        let mut canonical = String::new();
-        canonical.push_str(method);
-        canonical.push('\n');
-        canonical.push_str(path);
-        canonical.push('\n');
+    pub async fn get(&self, api_method: &str, params: Value) -> Result<Value> {
+        self.send_request(Method::GET, api_method, params).await
+    }
 
-        if let Some(q) = query {
-            // 需要与 C++ 保持同样的排序与编码
-            let mut pairs: Vec<(&String, &String)> = q.iter().collect();
-            pairs.sort_by(|a, b| a.0.cmp(b.0));
-            for (k, v) in pairs {
-                canonical.push_str(k);
-                canonical.push('=');
-                canonical.push_str(v);
-                canonical.push('&');
-            }
-            if canonical.ends_with('&') {
-                canonical.pop();
+    pub async fn send_request(
+        &self,
+        http_method: Method,
+        api_method: &str,
+        mut body: Value,
+    ) -> Result<Value> {
+        // 构造请求头
+        let client = Client::new();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(ACCEPT, "application/json".parse()?);
+        headers.insert(CONTENT_TYPE, "application/json; charset=UTF-8".parse()?);
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_str(&format!(
+                "{}{}",
+                constants::P_SDK_VERSION_PREFIX,
+                constants::PROJECT_VERSION
+            ))?,
+        );
+        if !self.client_config.token.is_empty() {
+            headers.insert(AUTHORIZATION, self.client_config.token.parse()?);
+        }
+
+        // 构造请求体
+        let mut params = json!({});
+        let common_params = self.build_common_params();
+        if let Some(obj) = common_params.as_object() {
+            for (k, v) in obj {
+                params[k] = v.clone();
             }
         }
-        canonical.push('\n');
-
-        if let Some(b) = body_json {
-            canonical.push_str(&b.to_string());
+        if !self.client_config.lang.is_empty() {
+            body["lang"] = Value::String(self.client_config.lang.clone());
         }
-        canonical.push('\n');
+        if !body.is_null() && body.as_object().map_or(0, |o| o.len()) > 0 {
+            params["biz_content"] = Value::String(body.to_string());
+        }
+        params["method"] = Value::String(api_method.to_string());
+        params["timestamp"] = Value::String(tiger_utils::get_timestamp());
 
-        canonical.push_str(&timestamp.to_string());
+        let sign_content = self.build_sign_content(&params);
+        let sign = tiger_utils::get_sign(&self.client_config.private_key, &sign_content)?;
+        params["sign"] = Value::String(sign);
 
-        // TODO: 用真实的 HMAC-SHA256
-        // 例如：hmac_sha256(SECRET_KEY, canonical) -> hex/base64
-        // 下面返回占位，避免误导
-        Ok(format!("SIGN({})", canonical))
-    }
-
-    /// GET 示例：拉取行情
-    pub async fn get_quotes(&self, symbols: &[&str]) -> Result<Vec<Quote>, TigerError> {
-        let path = format!("/{}/quotes", self.api_version);
-        let url = format!("{}{}", self.base_url, path);
-
-        let mut query: HashMap<String, String> = HashMap::new();
-        query.insert("symbols".to_string(), symbols.join(","));
-
-        let timestamp = current_millis();
-
-        let headers = self.build_headers(&path, "GET", Some(&query), None, timestamp)?;
-
-        let resp = self.client
-            .get(&url)
+        // 发送请求
+        let response: Response = client
+            .request(http_method, &self.client_config.server_url)
             .headers(headers)
-            .query(&query)
-            .timeout(self.default_timeout)
+            .json(&params)
             .send()
             .await?;
 
-        let status = resp.status();
-        let text = resp.text().await?;
+        // 解析响应
+        let result: Value = response.json().await?;
+        let result_str = result.to_string();
 
-        if !status.is_success() {
-            return Err(TigerError::Http(status, text));
+        if result["code"].is_null() {
+            return Err(anyhow!(format!("api error, response: {}", result_str)));
+        }
+        let code = result["code"].as_i64().unwrap_or(-1);
+        if code != 0 {
+            return Err(anyhow!(format!("api code error, response: {}", result_str)));
         }
 
-        let api: ApiResponse<Vec<Quote>> = serde_json::from_str(&text)?;
-        if api.code != 0 {
-            return Err(TigerError::Other(api.message.unwrap_or_else(|| "unknown error".into())));
+        let res_sign = result["sign"].as_str().unwrap_or("");
+
+        match tiger_utils::verify_sign(
+            &self.client_config.server_public_key,
+            params["timestamp"].as_str().unwrap_or(""),
+            res_sign,
+        ) {
+            Ok(valid) => {
+                if !valid {
+                    println!("签名验证失败 ❌\nResponse: {}", result_str);
+                }
+            }
+            Err(e) => {
+                println!("验证过程中出错: {}", e);
+            }
         }
-        Ok(api.data.unwrap_or_default())
+
+        Ok(result["data"].clone())
     }
 
-    /// POST 示例：下单
-    pub async fn place_order(&self, req: &OrderRequest) -> Result<OrderResponse, TigerError> {
-        let path = format!("/{}/orders/place", self.api_version);
-        let url = format!("{}{}", self.base_url, path);
+    pub fn identifiers_to_options(&self, identifiers: Value) -> Value {
+        let mut options: Vec<Value> = Vec::new();
+        if let Some(arr) = identifiers.as_array() {
+            for identifier in arr {
+                let ident_str = identifier.as_str().unwrap_or("");
+                let (symbol, expiry, right, strike) =
+                    contract_utils::ContractUtil::extract_option_info(ident_str);
+                if symbol.is_empty() || expiry.is_empty() || right.is_empty() {
+                    continue;
+                }
 
-        let body = serde_json::to_value(req)?;
-        let timestamp = current_millis();
-        let headers = self.build_headers(&path, "POST", None, Some(&body), timestamp)?;
-
-        let resp = self.client
-            .post(&url)
-            .headers(headers)
-            .json(&req)
-            .timeout(self.default_timeout)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let text = resp.text().await?;
-
-        if !status.is_success() {
-            return Err(TigerError::Http(status, text));
+                let obj = json!({ "expiry": tiger_utils::date_string_to_timestamp(&expiry), "right": right, "strike": strike, "symbol": symbol, });
+                options.push(obj);
+            }
         }
-
-        let api: ApiResponse<OrderResponse> = serde_json::from_str(&text)?;
-        if api.code != 0 {
-            return Err(TigerError::Other(api.message.unwrap_or_else(|| "unknown error".into())));
-        }
-        Ok(api.data.expect("order response missing"))
+        Value::Array(options)
     }
-
-    /// DELETE/POST 示例：撤单（按你的 C++ 实现替换）
-    pub async fn cancel_order(&self, order_id: &str) -> Result<(), TigerError> {
-        let path = format!("/{}/orders/cancel", self.api_version);
-        let url = format!("{}{}", self.base_url, path);
-
-        let mut payload = HashMap::new();
-        payload.insert("order_id", order_id.to_string());
-
-        let body = serde_json::to_value(&payload)?;
-        let timestamp = current_millis();
-        let headers = self.build_headers(&path, "POST", None, Some(&body), timestamp)?;
-
-        let resp = self.client
-            .post(&url)
-            .headers(headers)
-            .json(&payload)
-            .timeout(self.default_timeout)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        let text = resp.text().await?;
-
-        if !status.is_success() {
-            return Err(TigerError::Http(status, text));
-        }
-
-        let api: ApiResponse<serde_json::Value> = serde_json::from_str(&text)?;
-        if api.code != 0 {
-            return Err(TigerError::Other(api.message.unwrap_or_else(|| "unknown error".into())));
-        }
-        Ok(())
-    }
-}
-
-fn current_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_millis() as u64
 }

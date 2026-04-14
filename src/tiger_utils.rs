@@ -5,9 +5,10 @@ use openssl::pkey::PKey;
 use openssl::rsa::Rsa;
 use openssl::sign::{Signer, Verifier};
 use rsa::signature;
+use anyhow::{Result, anyhow};
 
 /// 等价于 C++ 的 hmac_sha1，返回 HMAC-SHA1 的原始字节
-pub fn hmac_sha1(key: &[u8], data: &[u8]) -> Result<Vec<u8>, ErrorStack> {
+pub fn hmac_sha1(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     let pkey = PKey::hmac(key)?;
     let mut signer = Signer::new(MessageDigest::sha1(), &pkey)?;
     signer.update(data)?;
@@ -37,14 +38,14 @@ pub fn create_rsa(
 pub fn sha1_sign(
     context: &str,
     private_key_pem: &str,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+) -> Result<Vec<u8>> {
     let content_bytes = match "utf-8" {
         "utf-8" => context.as_bytes(),
-        _ => return Err("Unsupported charset".into()),
+        _ => return Err(anyhow!("Unsupported charset")),
     };
     // 读取私钥
     let rsa = Rsa::private_key_from_pem(private_key_pem.as_bytes())
-        .map_err(|_| "RSA creation failed, please check your private key")?;
+        .map_err(|_| anyhow!("RSA creation failed, please check your private key"))?;
     let pkey = PKey::from_rsa(rsa)?;
 
     // 使用 Signer + MessageDigest::sha1 等价于 C++ 的 RSA_sign(NID_sha1, ...)
@@ -60,23 +61,23 @@ pub fn sha1_verify(
     context: &str,
     sign_base64: &str,
     public_key_pem: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
+) -> Result<bool> {
     // 读取公钥（SubjectPublicKeyInfo）
     let filled = fill_public_key_marker(public_key_pem);
     let pkey = PKey::public_key_from_pem(filled.as_bytes())
-        .map_err(|_| "RSA creation failed, please check your public key")?;
+        .map_err(|_| anyhow!("RSA creation failed, please check your public key"))?;
 
     // Base64 解码签名
     let signature = general_purpose::STANDARD
         .decode(sign_base64)
-        .map_err(|_| "Base64 decode signature failed")?;
+        .map_err(|_| anyhow!("Base64 decode signature failed"))?;
 
     let mut verifier = Verifier::new(MessageDigest::sha1(), &pkey)?;
     verifier
         .update(context.as_bytes())
-        .map_err(|_| "failed to verify")?;
+        .map_err(|_| anyhow!("failed to verify"))?;
 
-    let ok = verifier.verify(&signature).map_err(|_| "fao;")?;
+    let ok = verifier.verify(&signature).map_err(|_| anyhow!("failed to verify signature"))?;
     Ok(if ok { true } else { false })
 }
 
@@ -84,7 +85,7 @@ pub fn sha1_verify(
 pub fn get_sign(
     private_key_pem: &str,
     content: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String> {
     let filled = fill_private_key_marker(private_key_pem);
     let signature = sha1_sign(content, &filled)?;
     Ok(general_purpose::STANDARD.encode(signature))
@@ -124,18 +125,36 @@ pub fn fill_public_key_marker(key: &str) -> String {
 //     Ok(general_purpose::STANDARD.encode(signature))
 // }
 
-// /// 验证签名 (SHA1withRSA)
-// pub fn verify_sign(
-//     public_key_pem: &str,
-//     content: &str,
-//     encoded_signature: &str,
-// ) -> Result<bool, Box<dyn std::error::Error>> {
-//     let filled = fill_public_key_marker(public_key_pem);
-//     let public_key = RsaPublicKey::from_public_key_pem(&filled)?;
+/// 验证签名 (SHA1withRSA)
+pub fn verify_sign(
+    public_key_pem: &str,
+    content: &str,
+    encoded_signature: &str,
+) -> Result<bool> {
+   sha1_verify(content, encoded_signature, public_key_pem)
+}
 
-//     let digest = Sha1::digest(content.as_bytes());
-//     let signature = general_purpose::STANDARD.decode(encoded_signature)?;
 
-//     let result = public_key.verify(Pkcs1v15Verify::new::<Sha1>(), &digest, &signature);
-//     Ok(result.is_ok())
-// }
+use chrono::Local;
+
+pub fn get_timestamp() -> String {
+    // 获取当前时间（本地时区）
+    let now = Local::now();
+    // 格式化为 "YYYY-MM-DD HH:MM:SS"
+    let formatted = now.format("%Y-%m-%d %H:%M:%S").to_string();
+    formatted
+}
+
+use chrono::{NaiveDate, NaiveDateTime};
+
+pub fn date_string_to_timestamp(date_string: &str) -> i64 {
+    // 解析日期字符串，格式为 "YYYY-MM-DD"
+    let date = NaiveDate::parse_from_str(date_string, "%Y-%m-%d")
+        .expect("日期解析失败");
+
+    // 设置时间为当天的 00:00:00
+    let datetime = NaiveDateTime::new(date, chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+
+    // 转换为时间戳（秒），再乘以 1000 得到毫秒
+    datetime.and_utc().timestamp() * 1000
+}
