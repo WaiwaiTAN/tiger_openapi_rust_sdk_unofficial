@@ -25,6 +25,7 @@ use chrono::{Datelike, Days, NaiveDate, Utc};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
+use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -903,19 +904,33 @@ pub async fn download_xiaomi(quote_client: &mut QuoteClient) -> Result<(), Box<d
     Ok(())
 }
 
+fn tiger_config_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = env::var_os("TIGER_CONFIG_PATH")
+        .ok_or("环境变量 TIGER_CONFIG_PATH 未设置")?;
+
+    let path = PathBuf::from(path);
+
+    if !path.is_file() {
+        return Err(format!("Tiger 配置文件不存在：{}", path.display()).into());
+    }
+
+    Ok(path)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = ClientConfig::new();
-    cfg.props_path = Some(PathBuf::from("properties_sandbox/"));
-    cfg.load_props();
-    cfg.load_token();
+    let config_path = tiger_config_path()?;
+    cfg.props_path = Some(config_path);
+    cfg.load_props()?;
+    cfg.load_token()?;
 
     println!("===== 股票数据下载器 v2.0 =====");
     println!("功能: 批量下载 | 自动重试 | 缺失检测");
     println!();
 
     // Initialize client
-    let mut quote_client = QuoteClient::new(cfg.clone()).await;
+    let mut quote_client = QuoteClient::new(cfg.clone(), true).await?;
 
     // let ali240906 = quote_client.get_history_timeline(
     //     &json!(["09988"]),

@@ -113,6 +113,15 @@ impl ClientConfig {
             .props_path
             .as_ref()
             .ok_or(ConfigError::MissingDirectory)?;
+        if root.is_file() {
+            if name == constants::DEFAULT_PROPS_FILE {
+                return Ok(root.clone());
+            }
+            return root
+                .parent()
+                .map(|parent| parent.join(name))
+                .ok_or_else(|| ConfigError::NotDirectory(root.clone()));
+        }
         if !root.is_dir() {
             return Err(ConfigError::NotDirectory(root.clone()));
         }
