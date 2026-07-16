@@ -9,6 +9,30 @@ pub struct Properties {
 }
 
 impl Properties {
+    pub fn load_strict<R: BufRead>(&mut self, mut reader: R) -> std::io::Result<()> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
+                continue;
+            }
+            let (key, value) = split_kv(trimmed).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "expected key=value")
+            })?;
+            if key.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "empty key",
+                ));
+            }
+            self.data.insert(key.to_string(), value.to_string());
+        }
+        Ok(())
+    }
     pub fn load<R: BufRead>(&mut self, mut reader: R) -> std::io::Result<()> {
         let mut line = String::new();
         loop {

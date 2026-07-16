@@ -9,10 +9,10 @@ use tiger_openapi_rust_sdk_unofficial::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use anyhow::Result;
-use anyhow::{Error, anyhow};
+use anyhow::anyhow;
 use std::fs;
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -35,14 +35,13 @@ fn parse_trading_days<'a>(
             let mut trading_days: Vec<&str> = Vec::new();
 
             for day_obj in days_array {
-                if let serde_json::Value::Object(obj) = day_obj {
-                    if let Some(date_value) = obj.get("date") {
-                        if let Some(date_str) = date_value.as_str() {
-                            if date_str >= begin_date && date_str <= end_date {
-                                trading_days.push(date_str);
-                            }
-                        }
-                    }
+                if let serde_json::Value::Object(obj) = day_obj
+                    && let Some(date_value) = obj.get("date")
+                    && let Some(date_str) = date_value.as_str()
+                    && date_str >= begin_date
+                    && date_str <= end_date
+                {
+                    trading_days.push(date_str);
                 }
             }
 
@@ -84,8 +83,7 @@ async fn save_trading_data_as_jsonl(
     let response: Vec<ResponseData> = serde_json::from_value(
         quote_client
             .get_history_timeline(&json!(symbols), date, &tiger_enums::QuoteRight::br)
-            .await
-            .map_err(Error::from)?,
+            .await?,
     )?;
 
     if response.is_empty() {
@@ -127,11 +125,15 @@ async fn download_concurrently(
     let mut handles: Vec<JoinHandle<Result<String>>> = vec![];
 
     let mut cfg = ClientConfig::new();
-    cfg.props_path = Some(PathBuf::from("properties_sandbox/"));
-    cfg.load_props();
-    cfg.load_token();
+    cfg.props_path = Some(PathBuf::from(
+        std::env::var_os("TIGER_CREDENTIAL_DIRECTORY").ok_or_else(|| {
+            anyhow!("TIGER_CREDENTIAL_DIRECTORY must explicitly name the credential directory")
+        })?,
+    ));
+    cfg.load_props()?;
+    cfg.load_token()?;
 
-    let quote_client = QuoteClient::new(cfg.clone()).await;
+    let quote_client = QuoteClient::new(cfg.clone(), true).await?;
     let calendar_result = quote_client
         .get_trading_calendar(tiger_enums::Market::HK, begin_date, end_date)
         .await?;
@@ -153,7 +155,7 @@ async fn download_concurrently(
         let symbols_clone = symbols.clone();
 
         let handle = tokio::spawn(async move {
-            let mut quote_client = QuoteClient::new(cfg_clone.clone()).await;
+            let mut quote_client = QuoteClient::new(cfg_clone.clone(), true).await?;
             save_trading_data_as_jsonl(&mut quote_client, &symbols_clone, &date_str, &output_dir)
                 .await?;
             Ok(output_dir)
@@ -183,7 +185,7 @@ async fn download_concurrently(
         let mut writer = BufWriter::new(file);
 
         for folder in &generated_folders {
-            if let Some(date_part) = folder.split('_').last() {
+            if let Some(date_part) = folder.split('_').next_back() {
                 let file_path = format!("{}/data_{}_{}.jsonl", folder, symbol, date_part);
 
                 if Path::new(&file_path).exists() {
@@ -230,7 +232,7 @@ async fn download_concurrently(
             }
 
             for folder in &generated_folders {
-                if let Some(date_part) = folder.split('_').last() {
+                if let Some(date_part) = folder.split('_').next_back() {
                     let file_path = format!("{}/data_{}_{}.jsonl", folder, symbol, date_part);
                     if Path::new(&file_path).exists() {
                         let _ = fs::remove_file(&file_path);
