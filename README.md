@@ -1,110 +1,54 @@
-# tiger_openapi_rust_sdk_unofficial
+# Unofficial Tiger Rust SDK and read-only market-data gateway
 
-Unofficial Rust SDK for Tiger Brokers OpenAPI, with quote/trade client support and example utilities for downloading stock data with missing date detection.
+This repository contains four distinct surfaces:
 
-## Features
+- a reusable, unofficial Tiger quote SDK (`ClientConfig`, `TigerClient`, `QuoteClient`);
+- a local, provider-neutral, read-only HTTP gateway (`market_gateway`);
+- a legacy downloader binary (`downloader`);
+- optional trading code, compiled only with the `trade` feature and never linked by the gateway.
 
-- Rust library for Tiger Brokers OpenAPI interaction
-- Quote client and trade client abstractions
-- Client configuration loading from `.properties` files
-- Download utility with batch fetching, retry handling, and missing-date analysis
-- Example scripts for download workflow and K-line testing
+The project is unofficial, is not endorsed by Tiger Brokers, and may lag upstream API changes. Validate data before financial or research use.
 
-## Repository Structure
+## Gateway architecture and API
 
-- `Cargo.toml` — Rust package manifest
-- `src/` — library and example application source code
-  - `client_config.rs` — configuration loader and properties helper
-  - `quote_client.rs` — quote API client logic
-  - `trade_client.rs` — trade API client logic
-  - `tiger_client.rs` — shared Tiger OpenAPI request helpers
-  - `constants.rs` — API constants, default URLs, and default properties filenames
-  - `properties.rs` — simple `.properties` parser
-  - `main.rs` — downloader utility with missing-date detection logic
-- `examples/` — usage examples
-  - `downloader.rs` — stock data downloader with progress logging
-  - `test_kline.rs` — K-line test/example client
-- `properties/` — example production configuration files
-- `properties_sandbox/` — example sandbox configuration files
+The gateway binds to `127.0.0.1:8765` by default. It exposes only `GET /health`, `/ready`, `/v1/bars`, `/v1/calendar`, `/v1/quote`, `/v1/providers`, and `/openapi.json`. `/v1/quote` currently returns `501`: the existing SDK has no verified latest-quote request/response contract, and this implementation does not guess one. There are no account or execution routes.
 
-## Getting Started
+Bars support `1m`, `3m`, `5m`, `10m`, `15m`, `30m`, `1h`, `1d`, `1w`, and `1mo`; Tiger adjustments map `backward` to `br` and `none` to `nr`. Symbols are provider-native and returned unchanged. Currency, timezone, and completion are null unless reliably known.
 
-### Prerequisites
+SQLite stores normalized UTC bars under `(provider, symbol, interval, adjustment, timestamp)`. Writes are transactional/upserted. Covered ranges avoid repeat requests; `refresh=true` bypasses coverage. Exchange holidays are neither forward-filled nor treated as errors.
 
-- Rust toolchain (stable)
-- OpenSSL development libraries (`openssl` and headers) for the `openssl` crate
+See [architecture](docs/architecture.md), [security](docs/security.md), and [provider development](docs/provider-development.md).
 
-### Build
+## Build and test
 
 ```bash
-cargo build
+cargo build --bin market_gateway
+cargo test --all-features
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-### Run Examples
+Tests use mock providers, temporary SQLite databases, and fake values. They require no credentials or live network.
+
+## Configure and run
+
+Copy `config/gateway.example.toml` to `config/gateway.toml` and point `credential_directory` at an explicitly provisioned directory outside this repository containing:
+
+```text
+tiger_openapi_config.properties
+tiger_openapi_token.properties
+```
+
+On Unix, credential files must not be group- or world-accessible (use mode `0600`). The gateway never searches for credentials and never defaults to legacy repository directories.
 
 ```bash
-cargo run --example downloader
-cargo run --example test_kline
+cargo run --bin market_gateway -- --config config/gateway.toml
+curl 'http://127.0.0.1:8765/health'
+curl 'http://127.0.0.1:8765/v1/bars?symbol=7709.HK&interval=1d&start=2025-10-16&end=2026-07-16'
+curl 'http://127.0.0.1:8765/v1/calendar?market=HK&start=2026-07-01&end=2026-07-16'
+cargo run --example gateway_client -- bars --symbol 7709.HK --interval 1d --start 2025-10-16 --end 2026-07-16
 ```
 
-> Note: Example commands assume the example files compile as Cargo examples. If the examples are not configured as Cargo examples, run them via `cargo run --bin <name>` or by editing the `examples/` directory to match your intended invocation.
+Non-loopback binding is refused unless both `--allow-remote` and `--api-token-source PATH` are set. The file supplies a bearer token; query-string authentication is unsupported. CORS is not enabled.
 
-## Configuration
-
-This project uses property files for API credentials and environment configuration. Example files are provided in:
-
-- `properties/tiger_openapi_config.properties`
-- `properties/tiger_openapi_token.properties`
-- `properties_sandbox/tiger_openapi_config.properties`
-- `properties_sandbox/tiger_openapi_token.properties`
-
-### Common properties
-
-- `tiger_id`
-- `account`
-- `license`
-- `private_key_pk1`
-- `env` — set to `SANDBOX` for sandbox mode
-- `token` — stored in the token properties file
-
-### Default filenames
-
-The SDK expects:
-
-- `tiger_openapi_config.properties`
-- `tiger_openapi_token.properties`
-
-If you point `ClientConfig.props_path` at a directory, the SDK will load these filenames from that directory.
-
-## Usage
-
-As a library, import the crate and use the provided modules:
-
-```rust
-use tiger_openapi_rust_sdk_unofficial::client_config::ClientConfig;
-use tiger_openapi_rust_sdk_unofficial::quote_client::QuoteClient;
-use tiger_openapi_rust_sdk_unofficial::trade_client::TradeClient;
-```
-
-Create a `ClientConfig`, load the properties, and then instantiate the API clients.
-
-## Notes
-
-- The project is unofficial and intended for integration or experimentation with Tiger Brokers OpenAPI.
-- It currently supports both production and sandbox endpoints.
-- Missing-date detection and download progress tracking are implemented in `src/main.rs`.
-
-## Dependencies
-
-Key dependencies used by this project:
-
-- `tokio` for async runtime
-- `reqwest` for HTTP requests
-- `serde` / `serde_json` for JSON handling
-- `openssl`, `rsa`, `sha1`, `sha2` for request signing and encryption
-- `chrono` for date handling
-- `uuid` and `rand` for device/client identifiers
-
-## License
-
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+The legacy downloader uses the library rather than compiling duplicate modules and requires an explicit `TIGER_CREDENTIAL_DIRECTORY`. Build optional trading support with `--features trade`; it remains isolated from the gateway.
