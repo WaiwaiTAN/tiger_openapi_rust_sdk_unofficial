@@ -1,11 +1,10 @@
+use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose};
 use openssl::error::ErrorStack;
 use openssl::hash::MessageDigest;
 use openssl::pkey::PKey;
 use openssl::rsa::Rsa;
 use openssl::sign::{Signer, Verifier};
-use rsa::signature;
-use anyhow::{Result, anyhow};
 
 /// 等价于 C++ 的 hmac_sha1，返回 HMAC-SHA1 的原始字节
 pub fn hmac_sha1(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
@@ -35,10 +34,7 @@ pub fn create_rsa(
 }
 
 /// 用 SHA1 对 context 进行 RSA PKCS#1 v1.5 签名，返回原始签名字节
-pub fn sha1_sign(
-    context: &str,
-    private_key_pem: &str,
-) -> Result<Vec<u8>> {
+pub fn sha1_sign(context: &str, private_key_pem: &str) -> Result<Vec<u8>> {
     let content_bytes = match "utf-8" {
         "utf-8" => context.as_bytes(),
         _ => return Err(anyhow!("Unsupported charset")),
@@ -57,11 +53,7 @@ pub fn sha1_sign(
 }
 
 /// 使用 SHA1 与 RSA PKCS#1 v1.5 验签。sign 为 Base64 编码的签名
-pub fn sha1_verify(
-    context: &str,
-    sign_base64: &str,
-    public_key_pem: &str,
-) -> Result<bool> {
+pub fn sha1_verify(context: &str, sign_base64: &str, public_key_pem: &str) -> Result<bool> {
     // 读取公钥（SubjectPublicKeyInfo）
     let filled = fill_public_key_marker(public_key_pem);
     let pkey = PKey::public_key_from_pem(filled.as_bytes())
@@ -77,15 +69,14 @@ pub fn sha1_verify(
         .update(context.as_bytes())
         .map_err(|_| anyhow!("failed to verify"))?;
 
-    let ok = verifier.verify(&signature).map_err(|_| anyhow!("failed to verify signature"))?;
-    Ok(if ok { true } else { false })
+    let ok = verifier
+        .verify(&signature)
+        .map_err(|_| anyhow!("failed to verify signature"))?;
+    Ok(ok)
 }
 
 /// 获取 Base64 编码的签名
-pub fn get_sign(
-    private_key_pem: &str,
-    content: &str,
-) -> Result<String> {
+pub fn get_sign(private_key_pem: &str, content: &str) -> Result<String> {
     let filled = fill_private_key_marker(private_key_pem);
     let signature = sha1_sign(content, &filled)?;
     Ok(general_purpose::STANDARD.encode(signature))
@@ -126,14 +117,9 @@ pub fn fill_public_key_marker(key: &str) -> String {
 // }
 
 /// 验证签名 (SHA1withRSA)
-pub fn verify_sign(
-    public_key_pem: &str,
-    content: &str,
-    encoded_signature: &str,
-) -> Result<bool> {
-   sha1_verify(content, encoded_signature, public_key_pem)
+pub fn verify_sign(public_key_pem: &str, content: &str, encoded_signature: &str) -> Result<bool> {
+    sha1_verify(content, encoded_signature, public_key_pem)
 }
-
 
 use chrono::Local;
 
@@ -141,16 +127,14 @@ pub fn get_timestamp() -> String {
     // 获取当前时间（本地时区）
     let now = Local::now();
     // 格式化为 "YYYY-MM-DD HH:MM:SS"
-    let formatted = now.format("%Y-%m-%d %H:%M:%S").to_string();
-    formatted
+    now.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 use chrono::{NaiveDate, NaiveDateTime};
 
 pub fn date_string_to_timestamp(date_string: &str) -> i64 {
     // 解析日期字符串，格式为 "YYYY-MM-DD"
-    let date = NaiveDate::parse_from_str(date_string, "%Y-%m-%d")
-        .expect("日期解析失败");
+    let date = NaiveDate::parse_from_str(date_string, "%Y-%m-%d").expect("日期解析失败");
 
     // 设置时间为当天的 00:00:00
     let datetime = NaiveDateTime::new(date, chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());

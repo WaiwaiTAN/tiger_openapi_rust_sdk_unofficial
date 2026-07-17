@@ -2,28 +2,25 @@ use crate::client_config::ClientConfig;
 use crate::constants;
 use crate::service_types;
 use crate::tiger_client::TigerClient;
-use openssl::string;
 use serde_json::{Map, Value, json};
-use std::error::Error;
 // use std::time::SystemTime;
 use crate::models::Order;
-use libc::time_t;
 use anyhow::Result;
+use secrecy::ExposeSecret;
 #[derive(Debug, Clone)]
 pub struct TradeClient {
     client: TigerClient,
 }
 
 impl TradeClient {
-    pub fn new(cf: ClientConfig) -> Self {
-        let client = TigerClient::new(cf);
-        let tc = TradeClient { client };
-        tc
+    pub fn new(cf: ClientConfig) -> Result<Self> {
+        let client = TigerClient::new(cf)?;
+        Ok(TradeClient { client })
     }
 
     pub async fn prime_assets(&mut self) -> Result<Value> {
         let obj = json!({
-            "account": self.client.client_config.account.clone(),
+            "account": self.client.client_config.account.expose_secret(),
             "base_currency": "HKD",
             "consolidated": true,
             "lang": "en_US",
@@ -36,14 +33,7 @@ impl TradeClient {
         order: &mut Order,
     ) -> Result<Value, Box<dyn std::error::Error>> {
         let account_param = self.get_account_param(&order.account);
-        let mut obj = order.to_value(
-            account_param,
-            if let Some(secret_key) = &order.secret_key {
-                Some(secret_key.clone())
-            } else {
-                None
-            },
-        );
+        let mut obj = order.to_value(account_param, order.secret_key.clone());
 
         self.set_secret_key(&mut obj);
 
@@ -64,17 +54,35 @@ impl TradeClient {
 
     fn get_account_param(&self, account: &str) -> Value {
         if account.is_empty() {
-            Value::String(self.client.client_config.account.clone())
+            Value::String(
+                self.client
+                    .client_config
+                    .account
+                    .expose_secret()
+                    .to_string(),
+            )
         } else {
             Value::String(account.to_string())
         }
     }
 
     fn set_secret_key(&self, obj: &mut Map<String, Value>) {
-        if !self.client.client_config.secret_key.is_empty() {
+        if !self
+            .client
+            .client_config
+            .secret_key
+            .expose_secret()
+            .is_empty()
+        {
             obj.insert(
                 constants::P_SECRET_KEY.to_string(),
-                Value::String(self.client.client_config.secret_key.clone()),
+                Value::String(
+                    self.client
+                        .client_config
+                        .secret_key
+                        .expose_secret()
+                        .to_string(),
+                ),
             );
         }
     }

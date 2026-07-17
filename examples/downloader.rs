@@ -9,10 +9,23 @@ use tiger_openapi_rust_sdk_unofficial::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use anyhow::Result;
-use anyhow::{Error, anyhow};
+use anyhow::anyhow;
+use clap::Parser;
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Style},
+    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
+};
 use std::fs;
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -35,14 +48,13 @@ fn parse_trading_days<'a>(
             let mut trading_days: Vec<&str> = Vec::new();
 
             for day_obj in days_array {
-                if let serde_json::Value::Object(obj) = day_obj {
-                    if let Some(date_value) = obj.get("date") {
-                        if let Some(date_str) = date_value.as_str() {
-                            if date_str >= begin_date && date_str <= end_date {
-                                trading_days.push(date_str);
-                            }
-                        }
-                    }
+                if let serde_json::Value::Object(obj) = day_obj
+                    && let Some(date_value) = obj.get("date")
+                    && let Some(date_str) = date_value.as_str()
+                    && date_str >= begin_date
+                    && date_str <= end_date
+                {
+                    trading_days.push(date_str);
                 }
             }
 
@@ -84,8 +96,7 @@ async fn save_trading_data_as_jsonl(
     let response: Vec<ResponseData> = serde_json::from_value(
         quote_client
             .get_history_timeline(&json!(symbols), date, &tiger_enums::QuoteRight::br)
-            .await
-            .map_err(Error::from)?,
+            .await?,
     )?;
 
     if response.is_empty() {
@@ -127,11 +138,15 @@ async fn download_concurrently(
     let mut handles: Vec<JoinHandle<Result<String>>> = vec![];
 
     let mut cfg = ClientConfig::new();
-    cfg.props_path = Some(PathBuf::from("properties_sandbox/"));
-    cfg.load_props();
-    cfg.load_token();
+    cfg.props_path = Some(PathBuf::from(
+        std::env::var_os("TIGER_CREDENTIAL_DIRECTORY").ok_or_else(|| {
+            anyhow!("TIGER_CREDENTIAL_DIRECTORY must explicitly name the credential directory")
+        })?,
+    ));
+    cfg.load_props()?;
+    cfg.load_token()?;
 
-    let quote_client = QuoteClient::new(cfg.clone()).await;
+    let quote_client = QuoteClient::new(cfg.clone(), true).await?;
     let calendar_result = quote_client
         .get_trading_calendar(tiger_enums::Market::HK, begin_date, end_date)
         .await?;
@@ -153,7 +168,7 @@ async fn download_concurrently(
         let symbols_clone = symbols.clone();
 
         let handle = tokio::spawn(async move {
-            let mut quote_client = QuoteClient::new(cfg_clone.clone()).await;
+            let mut quote_client = QuoteClient::new(cfg_clone.clone(), true).await?;
             save_trading_data_as_jsonl(&mut quote_client, &symbols_clone, &date_str, &output_dir)
                 .await?;
             Ok(output_dir)
@@ -183,7 +198,7 @@ async fn download_concurrently(
         let mut writer = BufWriter::new(file);
 
         for folder in &generated_folders {
-            if let Some(date_part) = folder.split('_').last() {
+            if let Some(date_part) = folder.split('_').next_back() {
                 let file_path = format!("{}/data_{}_{}.jsonl", folder, symbol, date_part);
 
                 if Path::new(&file_path).exists() {
@@ -230,7 +245,7 @@ async fn download_concurrently(
             }
 
             for folder in &generated_folders {
-                if let Some(date_part) = folder.split('_').last() {
+                if let Some(date_part) = folder.split('_').next_back() {
                     let file_path = format!("{}/data_{}_{}.jsonl", folder, symbol, date_part);
                     if Path::new(&file_path).exists() {
                         let _ = fs::remove_file(&file_path);
@@ -246,19 +261,91 @@ async fn download_concurrently(
     Ok(())
 }
 
-// 使用示例
+#[derive(Debug, Parser)]
+#[command(
+    name = "downloader",
+    about = "Interactive Tiger historical-data downloader"
+)]
+struct DownloaderArgs {
+    /// Provider-native symbols. HK examples may be written as 7709.HK or 7709.
+    #[arg(long, value_delimiter = ',', default_value = "7709.HK")]
+    symbols: Vec<String>,
+    #[arg(long, default_value = "2021-01-01")]
+    start: String,
+    #[arg(long, default_value = "2026-03-06")]
+    end: String,
+}
+
+fn draw_tui(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    args: &DownloaderArgs,
+    status: &str,
+    progress: u16,
+) -> Result<()> {
+    terminal.draw(|frame| {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([Constraint::Length(5), Constraint::Length(3), Constraint::Min(5)])
+            .split(frame.area());
+        frame.render_widget(
+            Paragraph::new(format!("Tiger historical-data downloader\n\nSymbols: {}\nRange: {} → {}", args.symbols.join(", "), args.start, args.end))
+                .block(Block::default().title("Configuration").borders(Borders::ALL)),
+            chunks[0],
+        );
+        frame.render_widget(
+            Gauge::default()
+                .block(Block::default().title("Progress").borders(Borders::ALL))
+                .gauge_style(Style::default().fg(Color::Cyan))
+                .percent(progress),
+            chunks[1],
+        );
+        frame.render_widget(
+            List::new(vec![ListItem::new(status), ListItem::new("Press q or Esc to cancel; output files are written as <symbol>_full_data.jsonl")])
+                .block(Block::default().title("Status").borders(Borders::ALL)),
+            chunks[2],
+        );
+    })?;
+    Ok(())
+}
+
+async fn run_tui(args: DownloaderArgs) -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    let symbols = args.symbols.clone();
+    let start = args.start.clone();
+    let end = args.end.clone();
+    let task = tokio::spawn(async move { download_concurrently(&symbols, &start, &end).await });
+    let mut progress = 5;
+    let result = loop {
+        let status = if task.is_finished() {
+            "Finalizing download…"
+        } else {
+            "Downloading and merging…"
+        };
+        draw_tui(&mut terminal, &args, status, progress)?;
+        if task.is_finished() {
+            break task.await?;
+        }
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+            && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+        {
+            task.abort();
+            break Err(anyhow!("download cancelled by user"));
+        }
+        progress = (progress + 1).min(95);
+    };
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    result.map(|_| ())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    download_concurrently(
-        &vec![
-            "09988".into(),
-            "01810".into(),
-            "03032".into(),
-            "02259".into(),
-        ],
-        "2021-01-01",
-        "2026-03-06",
-    )
-    .await?;
-    Ok(())
+    run_tui(DownloaderArgs::parse()).await
 }

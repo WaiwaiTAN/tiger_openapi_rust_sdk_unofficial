@@ -5,8 +5,7 @@ use crate::service_types;
 use crate::tiger_client::TigerClient;
 use crate::tiger_enums;
 use anyhow::Result;
-use serde_json::{Map, Value};
-use std::error::Error;
+use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub struct QuoteClient {
@@ -14,13 +13,17 @@ pub struct QuoteClient {
 }
 
 impl QuoteClient {
-    pub async fn new(cf: ClientConfig) -> Self {
-        let client = TigerClient::new(cf);
+    pub async fn connect(cf: ClientConfig) -> Result<Self> {
+        Self::new(cf, true).await
+    }
+
+    pub async fn new(cf: ClientConfig, acquire_permission: bool) -> Result<Self> {
+        let client = TigerClient::new(cf)?;
         let qc = QuoteClient { client };
-        qc.grab_quote_permission()
-            .await
-            .expect("Failed to grab quote permission");
-        qc
+        if acquire_permission {
+            qc.grab_quote_permission().await?;
+        }
+        Ok(qc)
     }
 
     pub async fn grab_quote_permission(&self) -> Result<Value> {
@@ -103,6 +106,7 @@ impl QuoteClient {
         self.client.post(service_types::TRADING_CALENDAR, obj).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn get_kline_raw(
         &self,
         symbols: &Value,
@@ -123,9 +127,10 @@ impl QuoteClient {
             constants::P_LANG: "en_US",
             constants::P_PAGE_TOKEN: page_token,
         });
-        Ok(self.client.post(service_types::KLINE, obj).await?)
+        self.client.post(service_types::KLINE, obj).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_kline(
         &self,
         symbols: &Value,

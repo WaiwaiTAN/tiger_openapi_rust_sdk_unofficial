@@ -1,11 +1,14 @@
 pub mod client_config;
 pub mod constants;
 pub mod contract_utils;
+#[cfg(feature = "gateway")]
+pub mod gateway;
+pub mod models;
 pub mod properties;
-pub mod trade_client;
+pub mod quote_client;
 pub mod service_types;
 pub mod tiger_client;
 pub mod tiger_enums;
 pub mod tiger_utils;
-pub mod quote_client;
-pub mod models;
+#[cfg(feature = "trade")]
+pub mod trade_client;

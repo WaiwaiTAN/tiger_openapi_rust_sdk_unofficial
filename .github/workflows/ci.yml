@@ -1,0 +1,16 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo check --all-targets
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-features
+      - name: Secret-pattern scan
+        run: '! git grep -En "BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|Authorization: Bearer [A-Za-z0-9]" -- . ":(exclude)Cargo.lock"'

@@ -1,4 +1,5 @@
 // Translated from C++ TIGERAPI_ENUMS.h to Rust
+#![allow(non_camel_case_types)]
 
 use lazy_static::lazy_static;
 use std::collections::HashMap;

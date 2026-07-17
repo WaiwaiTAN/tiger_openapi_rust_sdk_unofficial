@@ -87,7 +87,6 @@ pub const INDUSTRY_LIST: &str = "industry_list";
 pub const INDUSTRY_STOCKS: &str = "industry_stocks";
 pub const STOCK_INDUSTRY: &str = "stock_industry";
 
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountData {

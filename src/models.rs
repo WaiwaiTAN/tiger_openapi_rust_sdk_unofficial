@@ -1,7 +1,7 @@
 // src/models.rs
 // 推荐文件名 models.rs（复数形式），因为是多个模型的集合
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use libc::time_t;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -65,6 +65,7 @@ impl Contract {
     }
 
     /// 期权构造函数 (sec_type, symbol, expiry, strike, right, currency, multiplier, local_symbol, contract_id)
+    #[allow(clippy::too_many_arguments)]
     pub fn option(
         sec_type: String,
         symbol: String,
@@ -90,6 +91,7 @@ impl Contract {
     }
 
     /// 期货构造函数 (sec_type, symbol, expiry, multiplier, contract_month, currency, exchange, local_symbol)
+    #[allow(clippy::too_many_arguments)]
     pub fn future(
         sec_type: String,
         symbol: String,
@@ -110,6 +112,12 @@ impl Contract {
         c.exchange = Some(exchange);
         c.local_symbol = Some(local_symbol);
         c
+    }
+}
+
+impl Default for Contract {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

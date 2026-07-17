@@ -40,6 +40,7 @@ impl ContractUtil {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn option_contract(
         symbol: &str,
         expiry: &str,
@@ -118,19 +119,18 @@ impl ContractUtil {
             let symbol = caps[1].to_string();
             let mut expiry = format!("20{}", &caps[2]);
             if expiry.len() == 8 {
-                expiry = format!(
-                    "{}-{}-{}",
-                    &expiry[0..4],
-                    &expiry[4..6],
-                    &expiry[6..8]
-                );
+                expiry = format!("{}-{}-{}", &expiry[0..4], &expiry[4..6], &expiry[6..8]);
             }
             let right = if &caps[3] == "C" { "CALL" } else { "PUT" }.to_string();
             let strike_val: f64 = caps[4].parse::<f64>().unwrap_or(0.0) / 1000.0;
             let strike = format!("{}", strike_val);
             return (symbol, expiry, right, strike);
         }
-        ("".to_string(), "".to_string(), "".to_string(), "".to_string())
+        (
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+        )
     }
 }
-

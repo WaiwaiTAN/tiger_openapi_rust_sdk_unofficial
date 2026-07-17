@@ -1,0 +1,12 @@
+bind = "127.0.0.1:8765"
+provider = "tiger"
+cache_path = "./data/cache/market_data.sqlite"
+request_timeout_seconds = 15
+max_date_span_days = 3650
+max_bars_per_response = 10000
+acquire_quote_permission_on_startup = false
+
+[tiger]
+credential_source = "directory"
+credential_directory = "/run/secrets/tiger"
+environment = "production"
