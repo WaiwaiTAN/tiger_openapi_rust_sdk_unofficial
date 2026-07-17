@@ -13,6 +13,19 @@ use serde_json::json;
 
 use anyhow::Result;
 use anyhow::anyhow;
+use clap::Parser;
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Style},
+    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
+};
 use std::fs;
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -248,19 +261,91 @@ async fn download_concurrently(
     Ok(())
 }
 
-// 使用示例
+#[derive(Debug, Parser)]
+#[command(
+    name = "downloader",
+    about = "Interactive Tiger historical-data downloader"
+)]
+struct DownloaderArgs {
+    /// Provider-native symbols. HK examples may be written as 7709.HK or 7709.
+    #[arg(long, value_delimiter = ',', default_value = "7709.HK")]
+    symbols: Vec<String>,
+    #[arg(long, default_value = "2021-01-01")]
+    start: String,
+    #[arg(long, default_value = "2026-03-06")]
+    end: String,
+}
+
+fn draw_tui(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    args: &DownloaderArgs,
+    status: &str,
+    progress: u16,
+) -> Result<()> {
+    terminal.draw(|frame| {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([Constraint::Length(5), Constraint::Length(3), Constraint::Min(5)])
+            .split(frame.area());
+        frame.render_widget(
+            Paragraph::new(format!("Tiger historical-data downloader\n\nSymbols: {}\nRange: {} → {}", args.symbols.join(", "), args.start, args.end))
+                .block(Block::default().title("Configuration").borders(Borders::ALL)),
+            chunks[0],
+        );
+        frame.render_widget(
+            Gauge::default()
+                .block(Block::default().title("Progress").borders(Borders::ALL))
+                .gauge_style(Style::default().fg(Color::Cyan))
+                .percent(progress),
+            chunks[1],
+        );
+        frame.render_widget(
+            List::new(vec![ListItem::new(status), ListItem::new("Press q or Esc to cancel; output files are written as <symbol>_full_data.jsonl")])
+                .block(Block::default().title("Status").borders(Borders::ALL)),
+            chunks[2],
+        );
+    })?;
+    Ok(())
+}
+
+async fn run_tui(args: DownloaderArgs) -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    let symbols = args.symbols.clone();
+    let start = args.start.clone();
+    let end = args.end.clone();
+    let task = tokio::spawn(async move { download_concurrently(&symbols, &start, &end).await });
+    let mut progress = 5;
+    let result = loop {
+        let status = if task.is_finished() {
+            "Finalizing download…"
+        } else {
+            "Downloading and merging…"
+        };
+        draw_tui(&mut terminal, &args, status, progress)?;
+        if task.is_finished() {
+            break task.await?;
+        }
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+            && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+        {
+            task.abort();
+            break Err(anyhow!("download cancelled by user"));
+        }
+        progress = (progress + 1).min(95);
+    };
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    result.map(|_| ())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    download_concurrently(
-        &vec![
-            "09988".into(),
-            "01810".into(),
-            "03032".into(),
-            "02259".into(),
-        ],
-        "2021-01-01",
-        "2026-03-06",
-    )
-    .await?;
-    Ok(())
+    run_tui(DownloaderArgs::parse()).await
 }
