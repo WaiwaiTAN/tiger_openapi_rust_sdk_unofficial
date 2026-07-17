@@ -51,7 +51,7 @@ cargo run --example gateway_client -- bars --symbol 7709.HK --interval 1d --star
 
 Non-loopback binding is refused unless both `--allow-remote` and `--api-token-source PATH` are set. The file supplies a bearer token; query-string authentication is unsupported. CORS is not enabled.
 
-The legacy downloader uses the library rather than compiling duplicate modules and requires an explicit `TIGER_CREDENTIAL_DIRECTORY`. It now runs as a terminal UI; the default target is the Hong Kong-listed SK Hynix 2× product:
+The downloader uses the library rather than compiling duplicate modules and requires an explicit `TIGER_CREDENTIAL_DIRECTORY`. It is a non-interactive CLI; the default target is the Hong Kong-listed SK Hynix 2× product:
 
 ```bash
 TIGER_CREDENTIAL_DIRECTORY=/absolute/path/to/tiger-credentials \
@@ -61,4 +61,17 @@ TIGER_CREDENTIAL_DIRECTORY=/absolute/path/to/tiger-credentials \
   --end 2026-07-17
 ```
 
-Pass comma-separated symbols such as `--symbols 7709.HK,000660.KS`. Press `q` or `Esc` to cancel. The downloader writes `<symbol>_full_data.jsonl` in the current directory. Build optional trading support with `--features trade`; it remains isolated from the gateway.
+Pass comma-separated symbols such as `--symbols 7709.HK,000660.KS`. The downloader runs detached by default, survives SSH disconnects, and writes data under `../stock_data/`. Build it once before starting a long-running download:
+
+```bash
+cargo build --release --bin downloader
+TIGER_CREDENTIAL_DIRECTORY=/absolute/path/to/tiger-credentials \
+  ./target/release/downloader \
+  --symbols 7709.HK,000660.KS \
+  --start 2025-01-01 \
+  --end 2026-07-17
+
+tail -f ../stock_data/downloader.log
+```
+
+The command prints the background PID before returning. Detached mode starts a separate Unix session and redirects standard input, output, and errors, so an SSH hangup does not terminate it. Pass `--foreground` to remain attached, `--output-dir PATH` to override the data directory, or `--log-file PATH` to override the detached log location. `--detach` remains accepted when you want to state the default explicitly. Build optional trading support with `--features trade`; it remains isolated from the gateway.
