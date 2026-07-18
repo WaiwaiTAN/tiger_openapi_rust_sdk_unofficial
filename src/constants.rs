@@ -60,6 +60,9 @@ pub const P_PAGE_SIZE: &str = "page_size";
 pub const P_SORT_DIR: &str = "sort_dir";
 pub const P_SORT_FIELD_NAME: &str = "sort_field_name";
 pub const P_WITH_DETAILS: &str = "with_details";
+pub const P_IS_BRIEF: &str = "is_brief";
+pub const P_STATES: &str = "states";
+pub const P_SORT_BY: &str = "sort_by";
 
 pub const PROJECT_VERSION: &str = "v1.1.0";
 pub const DEFAULT_CHAR_SET: &str = "UTF-8";

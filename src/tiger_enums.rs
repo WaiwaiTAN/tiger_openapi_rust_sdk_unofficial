@@ -260,7 +260,8 @@ impl CapitalPeriod {
     }
 }
 
-#[derive(Debug)]
+/// Field used to sort history orders and interpret their time range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderSortBy {
     LATEST_CREATED,
     LATEST_STATUS_UPDATED,
