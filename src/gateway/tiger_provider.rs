@@ -1,31 +1,33 @@
 use super::{error::ProviderError, models::*, provider::MarketDataProvider};
-use crate::{quote_client::QuoteClient, tiger_enums::Market};
 use async_trait::async_trait;
 use chrono::{NaiveDate, TimeZone, Utc};
-use serde_json::json;
 use std::sync::Arc;
+use tigeropen::{
+    config::ClientConfig,
+    model::quote_requests::{BriefRequest, KlineRequest, TradingCalendarRequest},
+    quote::QuoteClient,
+};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 pub struct TigerMarketDataProvider {
-    quote_client: QuoteClient,
+    config: ClientConfig,
     concurrency: Arc<Semaphore>,
 }
 impl TigerMarketDataProvider {
-    pub fn new(quote_client: QuoteClient, max_concurrency: usize) -> Self {
+    pub fn new(config: ClientConfig, max_concurrency: usize) -> Self {
         Self {
-            quote_client,
+            config,
             concurrency: Arc::new(Semaphore::new(max_concurrency.max(1))),
         }
     }
-    fn market(value: &str) -> Result<Market, ProviderError> {
+    fn market(value: &str) -> Result<String, ProviderError> {
         match value.to_ascii_uppercase().as_str() {
-            "US" => Ok(Market::US),
-            "HK" => Ok(Market::HK),
-            "CN" => Ok(Market::CN),
-            "SG" => Ok(Market::SG),
-            "ALL" => Ok(Market::ALL),
+            "US" | "HK" | "CN" | "SG" | "AU" | "ALL" => Ok(value.to_ascii_uppercase()),
             _ => Err(ProviderError::Unsupported),
         }
+    }
+    fn quote_client(&self) -> QuoteClient {
+        QuoteClient::from_config(self.config.clone())
     }
 }
 #[async_trait]
@@ -61,24 +63,27 @@ impl MarketDataProvider for TigerMarketDataProvider {
             _ => return Err(ProviderError::Unsupported),
         };
         let data = self
-            .quote_client
-            .get_kline(
-                &json!([r.symbol]),
-                Some(period),
-                Some(r.start.timestamp_millis()),
-                Some(r.end.timestamp_millis()),
-                Some(r.limit as i32),
-                Some(right),
-                r.page_token.as_deref(),
-            )
+            .quote_client()
+            .get_kline(KlineRequest {
+                symbols: Some(vec![r.symbol.clone()]),
+                period: Some(period.into()),
+                right: Some(right.into()),
+                begin_time: Some(r.start.timestamp_millis()),
+                end_time: Some(r.end.timestamp_millis()),
+                limit: Some(r.limit.min(i32::MAX as usize) as i32),
+                page_token: r.page_token.clone(),
+                ..Default::default()
+            })
             .await
             .map_err(|_| ProviderError::Upstream)?;
         let mut bars = Vec::new();
+        let next_page_token = data.iter().find_map(|line| {
+            (!line.next_page_token.is_empty()).then(|| line.next_page_token.clone())
+        });
         for line in data {
             for b in line.items {
-                let Some(time) = b.time else { continue };
                 let timestamp = Utc
-                    .timestamp_millis_opt(time)
+                    .timestamp_millis_opt(b.time)
                     .single()
                     .ok_or(ProviderError::Parse)?;
                 bars.push(Bar {
@@ -110,7 +115,7 @@ impl MarketDataProvider for TigerMarketDataProvider {
             start: r.start,
             end: r.end,
             bars,
-            next_page_token: None,
+            next_page_token,
             source_timestamp: Utc::now(),
         })
     }
@@ -124,23 +129,19 @@ impl MarketDataProvider for TigerMarketDataProvider {
             .await
             .map_err(|_| ProviderError::Upstream)?;
         let raw = self
-            .quote_client
-            .get_trading_calendar(
-                Self::market(&r.market)?,
-                &r.start.format("%Y-%m-%d").to_string(),
-                &r.end.format("%Y-%m-%d").to_string(),
-            )
+            .quote_client()
+            .get_trading_calendar(TradingCalendarRequest {
+                market: Some(Self::market(&r.market)?),
+                begin_date: Some(r.start.format("%Y-%m-%d").to_string()),
+                end_date: Some(r.end.format("%Y-%m-%d").to_string()),
+                ..Default::default()
+            })
             .await
             .map_err(|_| ProviderError::Upstream)?;
-        let array = raw.as_array().ok_or(ProviderError::Parse)?;
         let mut days = Vec::new();
-        for value in array {
-            let date = value
-                .get("date")
-                .and_then(|v| v.as_str())
-                .ok_or(ProviderError::Parse)?;
+        for value in raw.into_iter().filter(|day| day.is_trading) {
             days.push(CalendarDay {
-                date: NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                date: NaiveDate::parse_from_str(&value.date, "%Y-%m-%d")
                     .map_err(|_| ProviderError::Parse)?,
                 open: None,
                 close: None,
@@ -153,6 +154,42 @@ impl MarketDataProvider for TigerMarketDataProvider {
             provider: "tiger".into(),
             market: r.market,
             days,
+        })
+    }
+    async fn quote(&self, r: QuoteRequest) -> Result<QuoteResponse, ProviderError> {
+        let values = self
+            .quote_client()
+            .get_real_time_quote(BriefRequest {
+                symbols: Some(r.symbols),
+                ..Default::default()
+            })
+            .await
+            .map_err(|_| ProviderError::Upstream)?
+            .into_iter()
+            .map(|quote| {
+                serde_json::json!({
+                    "symbol": quote.symbol,
+                    "latest_price": quote.latest_price,
+                    "latest_time": quote.latest_time,
+                    "open": quote.open,
+                    "high": quote.high,
+                    "low": quote.low,
+                    "pre_close": quote.pre_close,
+                    "volume": quote.volume,
+                    "bid_price": quote.bid_price,
+                    "bid_size": quote.bid_size,
+                    "ask_price": quote.ask_price,
+                    "ask_size": quote.ask_size,
+                    "status": quote.status,
+                    "change": quote.change,
+                    "change_rate": quote.change_rate,
+                })
+            })
+            .collect();
+        Ok(QuoteResponse {
+            request_id: Uuid::new_v4(),
+            provider: "tiger".into(),
+            quotes: values,
         })
     }
 }

@@ -4,12 +4,12 @@
 //! This module provides a robust and efficient framework for downloading stock data
 //! with support for batch processing, automatic retries, and missing date detection.
 
-use tiger_openapi_rust_sdk_unofficial::{
-    client_config::ClientConfig, quote_client::QuoteClient, tiger_enums,
+use serde::Serialize;
+use tigeropen::{
+    config::ClientConfig,
+    model::quote_requests::{TimelineHistoryRequest, TradingCalendarRequest},
+    quote::QuoteClient,
 };
-
-use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use anyhow::Result;
 use anyhow::anyhow;
@@ -25,34 +25,24 @@ use tokio::task::JoinHandle;
 use tokio::pin;
 use tokio::time::sleep;
 use tokio_stream::StreamExt;
-fn parse_trading_days<'a>(
-    calendar_result: &'a serde_json::Value,
+fn parse_trading_days(
+    calendar_result: &[tigeropen::model::quote::TradingCalendarItem],
     begin_date: &str,
     end_date: &str,
-) -> Result<Vec<&'a str>> {
-    match calendar_result {
-        serde_json::Value::Array(days_array) => {
-            let mut trading_days: Vec<&str> = Vec::new();
-
-            for day_obj in days_array {
-                if let serde_json::Value::Object(obj) = day_obj
-                    && let Some(date_value) = obj.get("date")
-                    && let Some(date_str) = date_value.as_str()
-                    && date_str >= begin_date
-                    && date_str <= end_date
-                {
-                    trading_days.push(date_str);
-                }
-            }
-
-            trading_days.sort();
-            Ok(trading_days)
-        }
-        _ => Err(anyhow!("无法解析交易日历")),
-    }
+) -> Vec<String> {
+    let mut trading_days = calendar_result
+        .iter()
+        .filter(|day| {
+            day.is_trading && day.date.as_str() >= begin_date && day.date.as_str() <= end_date
+        })
+        .map(|day| day.date.clone())
+        .collect::<Vec<_>>();
+    trading_days.sort();
+    trading_days.dedup();
+    trading_days
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct MinuteData {
     #[serde(rename = "avgPrice")]
     avg_price: f64,
@@ -68,23 +58,20 @@ struct DailyData {
     minute_data: Vec<MinuteData>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ResponseData {
-    symbol: String,
-    items: Vec<MinuteData>,
-}
-
 async fn save_trading_data_as_jsonl(
-    quote_client: &mut QuoteClient,
+    quote_client: &QuoteClient,
     symbols: &[String],
     date: &str,
     output_dir: &str,
 ) -> Result<()> {
-    let response: Vec<ResponseData> = serde_json::from_value(
-        quote_client
-            .get_history_timeline(&json!(symbols), date, &tiger_enums::QuoteRight::br)
-            .await?,
-    )?;
+    let response = quote_client
+        .get_timeline_history(TimelineHistoryRequest {
+            symbols: Some(symbols.to_vec()),
+            date: Some(date.to_owned()),
+            right: Some("br".into()),
+            ..Default::default()
+        })
+        .await?;
 
     if response.is_empty() {
         return Err(anyhow!(
@@ -95,7 +82,21 @@ async fn save_trading_data_as_jsonl(
 
     for response_data in response {
         let symbol = &response_data.symbol;
-        let items = response_data.items;
+        let items = response_data
+            .intraday
+            .map(|bucket| {
+                bucket
+                    .items
+                    .into_iter()
+                    .map(|item| MinuteData {
+                        avg_price: item.avg_price,
+                        price: item.price,
+                        time: item.time,
+                        volume: item.volume,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let daily_data = DailyData {
             date: date.to_string(),
@@ -125,21 +126,18 @@ async fn download_concurrently(
 ) -> Result<()> {
     let mut handles: Vec<JoinHandle<Result<String>>> = vec![];
 
-    let mut cfg = ClientConfig::new();
-    cfg.props_path = Some(PathBuf::from(
-        std::env::var_os("TIGER_CREDENTIAL_DIRECTORY").ok_or_else(|| {
-            anyhow!("TIGER_CREDENTIAL_DIRECTORY must explicitly name the credential directory")
-        })?,
-    ));
-    cfg.load_props()?;
-    cfg.load_token()?;
-
-    let quote_client = QuoteClient::new(cfg.clone(), true).await?;
+    let cfg = ClientConfig::builder().build()?;
+    let quote_client = QuoteClient::from_config(cfg.clone());
     let calendar_result = quote_client
-        .get_trading_calendar(tiger_enums::Market::HK, begin_date, end_date)
+        .get_trading_calendar(TradingCalendarRequest {
+            market: Some("HK".into()),
+            begin_date: Some(begin_date.into()),
+            end_date: Some(end_date.into()),
+            ..Default::default()
+        })
         .await?;
 
-    let expected_dates = parse_trading_days(&calendar_result, begin_date, end_date)?;
+    let expected_dates = parse_trading_days(&calendar_result, begin_date, end_date);
     println!("预期交易日: {} 天", expected_dates.len());
     sleep(Duration::from_secs(6)).await;
 
@@ -156,10 +154,10 @@ async fn download_concurrently(
         let symbols_clone = symbols.to_vec();
 
         let handle = tokio::spawn(async move {
-            let mut quote_client = QuoteClient::new(cfg_clone.clone(), true).await?;
+            let quote_client = QuoteClient::from_config(cfg_clone);
             let day_output_dir_string = day_output_dir.to_string_lossy().into_owned();
             save_trading_data_as_jsonl(
-                &mut quote_client,
+                &quote_client,
                 &symbols_clone,
                 &date_str,
                 &day_output_dir_string,

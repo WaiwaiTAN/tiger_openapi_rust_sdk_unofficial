@@ -4,11 +4,17 @@
 flowchart TD
   A[Research code / Codex-generated client] -->|localhost HTTP| B[Market-data gateway]
   B --> C[Normalized MarketDataProvider trait]
-  C --> D[Tiger quote adapter]
-  D --> E[Tiger OpenAPI]
+  C --> D[Tiger provider adapter]
+  D --> E[Official tigeropen Rust SDK]
+  E --> G[Tiger REST API]
+  E --> H[Tiger TLS / Protobuf push]
+  H --> I[Local JSON WebSocket]
   B --> F[(Normalized SQLite cache)]
 ```
 
-The library owns signing, HTTP transport, and Tiger quote parsing. The adapter is the only translation layer between Tiger JSON and provider-neutral models. The router depends on `MarketDataProvider`, so another provider can be substituted without changing endpoint contracts. The gateway binary has no dependency on `TradeClient`; trade modules exist only behind the `trade` feature.
+The official `tigeropen` crate owns signing, token loading, HTTP transport,
+response parsing, and the persistent real-time connection. The adapter translates
+Tiger types into provider-neutral models. The gateway never constructs a trade
+client and exposes no account or execution routes.
 
 The cache records normalized bars and explicit fetched-range coverage. It does not infer missing holiday observations, currency, timezone, or incomplete-bar status.

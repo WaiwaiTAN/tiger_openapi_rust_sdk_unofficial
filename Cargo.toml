@@ -1,5 +1,5 @@
 [package]
-name = "tiger_openapi_rust_sdk_unofficial"
+name = "tiger_market_data"
 version = "0.1.0"
 edition = "2024"
 autobins = false
@@ -9,30 +9,22 @@ autoexamples = false
 default = ["quote", "gateway"]
 quote = []
 gateway = ["quote"]
-trade = []
 
 [dependencies]
 anyhow = "1.0.102"
 async-trait = "0.1.89"
-axum = { version = "0.8.4", features = ["macros"] }
-base64 = "0.22.1"
+axum = { version = "0.8.4", features = ["macros", "ws"] }
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.5.48", features = ["derive"] }
-lazy_static = "1.5.0"
+futures-util = "0.3"
 libc = "0.2.180"
-openssl = "0.10.73"
-pkcs8 = "0.10.2"
-rand = "0.9.2"
-regex = "1.12.3"
 reqwest = { version = "0.12.24", features = ["json"] }
 rusqlite = { version = "0.37.0", features = ["bundled", "chrono"] }
 rust_decimal = { version = "1.38.0", features = ["serde-with-str"] }
 secrecy = "0.10.3"
-rsa = "0.9.8"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-sha1 = "0.10.6"
-sha2 = "0.10.9"
+tigeropen = "=0.5.5"
 tokio = { version = "1.47.1", features = ["full"] }
 tokio-stream = "0.1.18"
 tower = { version = "0.5.2", features = ["limit", "timeout"] }
@@ -42,7 +34,6 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 toml = "0.9.7"
 thiserror = "2.0.17"
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
-zeroize = "1.8.2"
 
 [dev-dependencies]
 tempfile = "3.23.0"
@@ -50,7 +41,7 @@ tower = { version = "0.5.2", features = ["util"] }
 wiremock = "0.6.5"
 
 [lib]
-name = "tiger_openapi_rust_sdk_unofficial"
+name = "tiger_market_data"
 path = "src/lib.rs"
 
 [[bin]]
