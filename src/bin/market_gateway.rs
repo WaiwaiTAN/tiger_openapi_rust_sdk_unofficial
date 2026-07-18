@@ -8,14 +8,11 @@ use axum::{
 use clap::Parser;
 use secrecy::{ExposeSecret, SecretString};
 use std::{path::PathBuf, sync::Arc};
-use tiger_openapi_rust_sdk_unofficial::{
-    client_config::ClientConfig,
-    gateway::{
-        cache::MarketCache, config::GatewayConfig, router, state::AppState,
-        tiger_provider::TigerMarketDataProvider,
-    },
-    quote_client::QuoteClient,
+use tiger_market_data::gateway::{
+    cache::MarketCache, config::GatewayConfig, realtime::RealtimeHub, router, state::AppState,
+    tiger_provider::TigerMarketDataProvider,
 };
+use tigeropen::{config::ClientConfig, quote::QuoteClient};
 #[derive(Parser)]
 struct Args {
     #[arg(long, default_value = "config/gateway.toml")]
@@ -66,18 +63,28 @@ async fn main() -> anyhow::Result<()> {
     }
     let cfg = GatewayConfig::load(&args.config)?;
     cfg.validate_bind(args.allow_remote, args.api_token_source.as_deref())?;
-    let tiger = cfg
+    let mut builder = ClientConfig::builder();
+    if let Some(path) = cfg
         .tiger
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("tiger provider configuration is required"))?;
-    if tiger.credential_source != "directory" {
-        anyhow::bail!("only directory credential source is supported");
+        .as_ref()
+        .and_then(|tiger| tiger.credential_file.as_ref())
+    {
+        builder = builder.properties_file(&path.to_string_lossy());
     }
-    let mut client_cfg = ClientConfig::with_credential_directory(&tiger.credential_directory);
-    client_cfg.load_props()?;
-    client_cfg.load_token()?;
-    let quote = QuoteClient::new(client_cfg, cfg.acquire_quote_permission_on_startup).await?;
-    let provider = Arc::new(TigerMarketDataProvider::new(quote, 4));
+    let client_cfg = builder.build()?;
+    if cfg.acquire_quote_permission_on_startup {
+        QuoteClient::from_config(client_cfg.clone())
+            .grab_quote_permission()
+            .await?;
+    }
+    let realtime = match RealtimeHub::connect(client_cfg.clone()).await {
+        Ok(hub) => Some(hub),
+        Err(error) => {
+            tracing::warn!(%error, "real-time push unavailable; REST gateway will continue");
+            None
+        }
+    };
+    let provider = Arc::new(TigerMarketDataProvider::new(client_cfg, 4));
     if let Some(parent) = cfg.cache_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -86,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
         provider,
         cache,
         config: cfg.clone(),
+        realtime,
     });
     let app = if let Some(path) = args.api_token_source {
         let value = std::fs::read_to_string(path)?.trim().to_owned();

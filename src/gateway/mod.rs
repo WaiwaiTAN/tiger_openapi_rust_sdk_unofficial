@@ -4,6 +4,7 @@ pub mod config;
 pub mod error;
 pub mod models;
 pub mod provider;
+pub mod realtime;
 pub mod state;
 pub mod tiger_provider;
 pub use api::{ROUTES, router};

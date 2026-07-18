@@ -39,8 +39,9 @@ fn provider() -> String {
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct TigerConfig {
-    pub credential_source: String,
-    pub credential_directory: PathBuf,
+    /// Optional official Tiger properties file. TIGEROPEN_* environment variables
+    /// take precedence and require no file.
+    pub credential_file: Option<PathBuf>,
     #[serde(default)]
     pub environment: String,
 }

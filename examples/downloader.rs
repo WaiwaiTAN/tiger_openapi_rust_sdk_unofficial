@@ -4,68 +4,45 @@
 //! This module provides a robust and efficient framework for downloading stock data
 //! with support for batch processing, automatic retries, and missing date detection.
 
-use tiger_openapi_rust_sdk_unofficial::{
-    client_config::ClientConfig, quote_client::QuoteClient, tiger_enums,
+use serde::Serialize;
+use tigeropen::{
+    config::ClientConfig,
+    model::quote_requests::{TimelineHistoryRequest, TradingCalendarRequest},
+    quote::QuoteClient,
 };
-
-use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use anyhow::Result;
 use anyhow::anyhow;
 use clap::Parser;
-use crossterm::{
-    event::{self, Event, KeyCode},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
-    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
-};
 use std::fs;
-
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::path::PathBuf;
-
+use std::process::{Command, Stdio};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
 use tokio::pin;
 use tokio::time::sleep;
 use tokio_stream::StreamExt;
-fn parse_trading_days<'a>(
-    calendar_result: &'a serde_json::Value,
+fn parse_trading_days(
+    calendar_result: &[tigeropen::model::quote::TradingCalendarItem],
     begin_date: &str,
     end_date: &str,
-) -> Result<Vec<&'a str>> {
-    match calendar_result {
-        serde_json::Value::Array(days_array) => {
-            let mut trading_days: Vec<&str> = Vec::new();
-
-            for day_obj in days_array {
-                if let serde_json::Value::Object(obj) = day_obj
-                    && let Some(date_value) = obj.get("date")
-                    && let Some(date_str) = date_value.as_str()
-                    && date_str >= begin_date
-                    && date_str <= end_date
-                {
-                    trading_days.push(date_str);
-                }
-            }
-
-            trading_days.sort();
-            Ok(trading_days)
-        }
-        _ => Err(anyhow!("无法解析交易日历")),
-    }
+) -> Vec<String> {
+    let mut trading_days = calendar_result
+        .iter()
+        .filter(|day| {
+            day.is_trading && day.date.as_str() >= begin_date && day.date.as_str() <= end_date
+        })
+        .map(|day| day.date.clone())
+        .collect::<Vec<_>>();
+    trading_days.sort();
+    trading_days.dedup();
+    trading_days
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct MinuteData {
     #[serde(rename = "avgPrice")]
     avg_price: f64,
@@ -81,23 +58,20 @@ struct DailyData {
     minute_data: Vec<MinuteData>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ResponseData {
-    symbol: String,
-    items: Vec<MinuteData>,
-}
-
 async fn save_trading_data_as_jsonl(
-    quote_client: &mut QuoteClient,
-    symbols: &Vec<String>,
+    quote_client: &QuoteClient,
+    symbols: &[String],
     date: &str,
     output_dir: &str,
 ) -> Result<()> {
-    let response: Vec<ResponseData> = serde_json::from_value(
-        quote_client
-            .get_history_timeline(&json!(symbols), date, &tiger_enums::QuoteRight::br)
-            .await?,
-    )?;
+    let response = quote_client
+        .get_timeline_history(TimelineHistoryRequest {
+            symbols: Some(symbols.to_vec()),
+            date: Some(date.to_owned()),
+            right: Some("br".into()),
+            ..Default::default()
+        })
+        .await?;
 
     if response.is_empty() {
         return Err(anyhow!(
@@ -108,7 +82,21 @@ async fn save_trading_data_as_jsonl(
 
     for response_data in response {
         let symbol = &response_data.symbol;
-        let items = response_data.items;
+        let items = response_data
+            .intraday
+            .map(|bucket| {
+                bucket
+                    .items
+                    .into_iter()
+                    .map(|item| MinuteData {
+                        avg_price: item.avg_price,
+                        price: item.price,
+                        time: item.time,
+                        volume: item.volume,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let daily_data = DailyData {
             date: date.to_string(),
@@ -131,47 +119,51 @@ async fn save_trading_data_as_jsonl(
 }
 
 async fn download_concurrently(
-    symbols: &Vec<String>,
+    symbols: &[String],
     begin_date: &str,
     end_date: &str,
+    output_dir: &Path,
 ) -> Result<()> {
     let mut handles: Vec<JoinHandle<Result<String>>> = vec![];
 
-    let mut cfg = ClientConfig::new();
-    cfg.props_path = Some(PathBuf::from(
-        std::env::var_os("TIGER_CREDENTIAL_DIRECTORY").ok_or_else(|| {
-            anyhow!("TIGER_CREDENTIAL_DIRECTORY must explicitly name the credential directory")
-        })?,
-    ));
-    cfg.load_props()?;
-    cfg.load_token()?;
-
-    let quote_client = QuoteClient::new(cfg.clone(), true).await?;
+    let cfg = ClientConfig::builder().build()?;
+    let quote_client = QuoteClient::from_config(cfg.clone());
     let calendar_result = quote_client
-        .get_trading_calendar(tiger_enums::Market::HK, begin_date, end_date)
+        .get_trading_calendar(TradingCalendarRequest {
+            market: Some("HK".into()),
+            begin_date: Some(begin_date.into()),
+            end_date: Some(end_date.into()),
+            ..Default::default()
+        })
         .await?;
 
-    let expected_dates = parse_trading_days(&calendar_result, begin_date, end_date)?;
+    let expected_dates = parse_trading_days(&calendar_result, begin_date, end_date);
     println!("预期交易日: {} 天", expected_dates.len());
     sleep(Duration::from_secs(6)).await;
 
     let stream = tokio_stream::iter(expected_dates.clone()).throttle(Duration::from_secs(7));
     pin!(stream);
     while let Some(date) = stream.next().await {
-        let output_dir = format!("/tmp/trading_data_{}", date);
-        match fs::create_dir_all(&output_dir) {
-            Ok(_) => println!("目录创建成功: {}", output_dir),
+        let day_output_dir = output_dir.join(format!(".trading_data_{}", date));
+        match fs::create_dir_all(&day_output_dir) {
+            Ok(_) => println!("目录创建成功: {}", day_output_dir.display()),
             Err(e) => eprintln!("创建目录失败: {}", e),
         }
         let date_str = date.to_string();
         let cfg_clone = cfg.clone();
-        let symbols_clone = symbols.clone();
+        let symbols_clone = symbols.to_vec();
 
         let handle = tokio::spawn(async move {
-            let mut quote_client = QuoteClient::new(cfg_clone.clone(), true).await?;
-            save_trading_data_as_jsonl(&mut quote_client, &symbols_clone, &date_str, &output_dir)
-                .await?;
-            Ok(output_dir)
+            let quote_client = QuoteClient::from_config(cfg_clone);
+            let day_output_dir_string = day_output_dir.to_string_lossy().into_owned();
+            save_trading_data_as_jsonl(
+                &quote_client,
+                &symbols_clone,
+                &date_str,
+                &day_output_dir_string,
+            )
+            .await?;
+            Ok(day_output_dir_string)
         });
         handles.push(handle);
     }
@@ -187,7 +179,7 @@ async fn download_concurrently(
 
     for symbol in symbols {
         let final_filename = format!("{}_full_data.jsonl", symbol);
-        let final_path = format!("./{}", final_filename);
+        let final_path = output_dir.join(final_filename);
 
         println!("开始合并 Symbol: {} 的数据...", symbol);
 
@@ -237,7 +229,9 @@ async fn download_concurrently(
         if processed_files > 0 {
             println!(
                 "Symbol: {} 已合并 {} 个文件，生成: {}",
-                symbol, processed_files, final_path
+                symbol,
+                processed_files,
+                final_path.display()
             );
 
             if skipped_files > 0 {
@@ -262,10 +256,7 @@ async fn download_concurrently(
 }
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "downloader",
-    about = "Interactive Tiger historical-data downloader"
-)]
+#[command(name = "downloader", about = "Tiger historical-data downloader")]
 struct DownloaderArgs {
     /// Provider-native symbols. HK examples may be written as 7709.HK or 7709.
     #[arg(long, value_delimiter = ',', default_value = "7709.HK")]
@@ -274,78 +265,83 @@ struct DownloaderArgs {
     start: String,
     #[arg(long, default_value = "2026-03-06")]
     end: String,
+    /// Directory for completed JSONL files and temporary daily files.
+    #[arg(long, default_value = "../stock_data/")]
+    output_dir: PathBuf,
+    /// Explicitly request the default detached mode (Unix only).
+    #[arg(long, conflicts_with = "foreground")]
+    detach: bool,
+    /// Stay attached to the terminal instead of running in the background.
+    #[arg(long, conflicts_with = "detach")]
+    foreground: bool,
+    /// Log file used in detached mode (defaults to <output-dir>/downloader.log).
+    #[arg(long, conflicts_with = "foreground")]
+    log_file: Option<PathBuf>,
+    /// Internal flag used by the detached child process.
+    #[arg(long, hide = true)]
+    detached_child: bool,
 }
 
-fn draw_tui(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    args: &DownloaderArgs,
-    status: &str,
-    progress: u16,
-) -> Result<()> {
-    terminal.draw(|frame| {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .margin(1)
-            .constraints([Constraint::Length(5), Constraint::Length(3), Constraint::Min(5)])
-            .split(frame.area());
-        frame.render_widget(
-            Paragraph::new(format!("Tiger historical-data downloader\n\nSymbols: {}\nRange: {} → {}", args.symbols.join(", "), args.start, args.end))
-                .block(Block::default().title("Configuration").borders(Borders::ALL)),
-            chunks[0],
-        );
-        frame.render_widget(
-            Gauge::default()
-                .block(Block::default().title("Progress").borders(Borders::ALL))
-                .gauge_style(Style::default().fg(Color::Cyan))
-                .percent(progress),
-            chunks[1],
-        );
-        frame.render_widget(
-            List::new(vec![ListItem::new(status), ListItem::new("Press q or Esc to cancel; output files are written as <symbol>_full_data.jsonl")])
-                .block(Block::default().title("Status").borders(Borders::ALL)),
-            chunks[2],
-        );
-    })?;
+#[cfg(unix)]
+fn spawn_detached(args: &DownloaderArgs) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    fs::create_dir_all(&args.output_dir)?;
+    let log_path = args
+        .log_file
+        .clone()
+        .unwrap_or_else(|| args.output_dir.join("downloader.log"));
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let stderr = log.try_clone()?;
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("--symbols")
+        .arg(args.symbols.join(","))
+        .arg("--start")
+        .arg(&args.start)
+        .arg("--end")
+        .arg(&args.end)
+        .arg("--output-dir")
+        .arg(&args.output_dir)
+        .arg("--detached-child")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr));
+    // SAFETY: setsid has no memory-safety preconditions and is called before exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn()?;
+    println!("Downloader started in background (PID {}).", child.id());
+    println!("Log: {}", log_path.display());
     Ok(())
-}
-
-async fn run_tui(args: DownloaderArgs) -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    let symbols = args.symbols.clone();
-    let start = args.start.clone();
-    let end = args.end.clone();
-    let task = tokio::spawn(async move { download_concurrently(&symbols, &start, &end).await });
-    let mut progress = 5;
-    let result = loop {
-        let status = if task.is_finished() {
-            "Finalizing download…"
-        } else {
-            "Downloading and merging…"
-        };
-        draw_tui(&mut terminal, &args, status, progress)?;
-        if task.is_finished() {
-            break task.await?;
-        }
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-            && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-        {
-            task.abort();
-            break Err(anyhow!("download cancelled by user"));
-        }
-        progress = (progress + 1).min(95);
-    };
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    result.map(|_| ())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    run_tui(DownloaderArgs::parse()).await
+    let args = DownloaderArgs::parse();
+    let should_detach = args.detach || !args.foreground;
+    if should_detach && !args.detached_child {
+        #[cfg(unix)]
+        return spawn_detached(&args);
+        #[cfg(not(unix))]
+        return Err(anyhow!("--detach is currently supported only on Unix"));
+    }
+    fs::create_dir_all(&args.output_dir)?;
+    println!(
+        "Downloading {} from {} to {} into {}",
+        args.symbols.join(", "),
+        args.start,
+        args.end,
+        args.output_dir.display()
+    );
+    download_concurrently(&args.symbols, &args.start, &args.end, &args.output_dir).await
 }

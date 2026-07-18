@@ -1,7 +1,11 @@
 use super::{error::GatewayError, models::*, state::AppState};
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{
+        Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    response::Response,
     routing::get,
 };
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
@@ -21,6 +25,7 @@ pub const ROUTES: &[&str] = &[
     "/v1/bars",
     "/v1/calendar",
     "/v1/quote",
+    "/v1/stream",
     "/v1/providers",
     "/openapi.json",
 ];
@@ -32,6 +37,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/bars", get(bars))
         .route("/v1/calendar", get(calendar))
         .route("/v1/quote", get(quote))
+        .route("/v1/stream", get(stream))
         .route("/v1/providers", get(providers))
         .route("/openapi.json", get(openapi))
         .with_state(state)
@@ -258,12 +264,71 @@ async fn calendar(
             .await?,
     ))
 }
-async fn quote() -> Result<Json<Value>, GatewayError> {
-    Err(GatewayError::NotImplemented)
+#[derive(Deserialize)]
+struct QuoteQuery {
+    symbols: String,
+}
+async fn quote(
+    State(s): State<AppState>,
+    Query(q): Query<QuoteQuery>,
+) -> Result<Json<QuoteResponse>, GatewayError> {
+    let symbols = q
+        .symbols
+        .split(',')
+        .map(str::trim)
+        .filter(|symbol| !symbol.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if symbols.is_empty() || symbols.len() > 50 {
+        return Err(GatewayError::Validation(
+            "symbols must contain between 1 and 50 comma-separated values".into(),
+        ));
+    }
+    Ok(Json(s.provider.quote(QuoteRequest { symbols }).await?))
+}
+async fn stream(
+    ws: WebSocketUpgrade,
+    State(s): State<AppState>,
+    Query(q): Query<QuoteQuery>,
+) -> Result<Response, GatewayError> {
+    let symbols = q
+        .symbols
+        .split(',')
+        .map(str::trim)
+        .filter(|symbol| !symbol.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if symbols.is_empty() || symbols.len() > 50 {
+        return Err(GatewayError::Validation(
+            "symbols must contain between 1 and 50 comma-separated values".into(),
+        ));
+    }
+    let hub = s.realtime.ok_or(GatewayError::NotImplemented)?;
+    let receiver = hub
+        .subscribe(&symbols)
+        .map_err(|_| GatewayError::Provider(super::error::ProviderError::Upstream))?;
+    Ok(ws.on_upgrade(move |socket| stream_quotes(socket, receiver, symbols)))
+}
+async fn stream_quotes(
+    mut socket: WebSocket,
+    mut receiver: tokio::sync::broadcast::Receiver<super::realtime::RealtimeQuote>,
+    symbols: Vec<String>,
+) {
+    while let Ok(quote) = receiver.recv().await {
+        if !symbols.iter().any(|symbol| symbol == &quote.symbol) {
+            continue;
+        }
+        let Ok(payload) = serde_json::to_string(&quote) else {
+            continue;
+        };
+        if socket.send(Message::Text(payload.into())).await.is_err() {
+            break;
+        }
+    }
 }
 async fn providers(State(s): State<AppState>) -> Json<Value> {
     Json(
-        json!([{"name":s.provider.provider_name(),"configured":true,"available":true,"capabilities":["bars","calendar"]}]),
+        json!([{"name":s.provider.provider_name(),"configured":true,"available":true,"capabilities":["bars","calendar","quote"]}]),
     )
 }
 async fn openapi() -> Json<Value> {
@@ -334,6 +399,7 @@ mod tests {
                 acquire_quote_permission_on_startup: false,
                 tiger: None,
             },
+            realtime: None,
         })
     }
     #[test]

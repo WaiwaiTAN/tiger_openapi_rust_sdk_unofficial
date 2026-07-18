@@ -7,6 +7,6 @@ max_bars_per_response = 10000
 acquire_quote_permission_on_startup = false
 
 [tiger]
-credential_source = "directory"
-credential_directory = "/run/secrets/tiger"
 environment = "production"
+# Optional fallback. TIGEROPEN_* environment variables have higher priority.
+# credential_file = "/run/secrets/tiger_openapi_config.properties"
